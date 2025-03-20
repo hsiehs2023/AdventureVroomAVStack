@@ -32,6 +32,35 @@ function localize(gps_channel, imu_channel, localization_state_channel)
     end 
 end
 
+function compute_bbox(seg::RoadSegment)
+    xs = Float64[]
+    ys = Float64[]
+    for lb in seg.lane_boundaries
+        push!(xs, lb.pt_a[1])
+        push!(ys, lb.pt_a[2])
+        push!(xs, lb.pt_b[1])
+        push!(ys, lb.pt_b[2])
+    end
+    return (minimum(xs), maximum(xs), minimum(ys), maximum(ys))
+end
+
+function point_in_bbox(pos::SVector{2,Float64}, bbox::Tuple{Float64,Float64,Float64,Float64})
+    x, y = pos[1], pos[2]
+    xmin, xmax, ymin, ymax = bbox
+    return (xmin ≤ x ≤ xmax) && (ymin ≤ y ≤ ymax)
+end
+
+function find_current_segment(localization_state::MyLocalizationType, all_segs::Dict{Int, RoadSegment})
+    pos = SVector{2,Float64}(Float64(localization_state.field1), localization_state.field2)
+    for (id, seg) in all_segs
+        bbox = compute_bbox(seg)
+        if point_in_bbox(pos, bbox)
+            return id
+        end
+    end
+    return nothing  # Return nothing if no segment is found.
+end
+
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel)
     # set up stuff
     while true
