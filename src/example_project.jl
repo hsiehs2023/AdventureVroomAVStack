@@ -154,6 +154,23 @@ function straight_lane_constraint(X, outer_bound, inner_bound)
     # we will need different lane constraint functions depending on shape of lane boundaries (curved vs. straight)
 end
 
+# Gloria
+# function generateRoute(current_segment_id, target_road_segment_id, map)
+#     curr_segment = map[current_segment]
+#     target_segment = map[target_road_segment_id]
+#     to_visit = Queue(RoadSegment)
+#     path = []
+
+#     # TODO: implement simple BFS followed by A* search
+#     # while curr_segment != target_segment
+#     #     # dequeue the current path (array of integer segment ids)
+#     #     # enqueue all children of the current segment into to_visit
+#     #     # 
+#     # end
+
+#     return path
+# end
+
 function decision_making(localization_state_channel, 
         perception_state_channel, 
         map, 
@@ -164,7 +181,15 @@ function decision_making(localization_state_channel,
         latest_localization_state = fetch(localization_state_channel)
         latest_perception_state = fetch(perception_state_channel)
 
-        # figure out what to do ... setup motion planning problem etc
+        # Routing
+        # Verification check that current_segment_id = where our localization says we are
+        # generateRoute(current_segment_id, target_road_segment_id, map)
+
+        # Trajectory Generation
+        # Use ipopt/ HW2 structure to express geometric costs and constraints
+
+
+        # PID Control
         steering_angle = 0.0
         target_vel = 0.0
         cmd = (steering_angle, target_vel, true)
