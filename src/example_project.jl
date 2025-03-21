@@ -32,6 +32,8 @@ function localize(gps_channel, imu_channel, localization_state_channel)
     end 
 end
 
+## Ellie Chason - start - ##
+
 function compute_bbox(seg::RoadSegment)
     xs = Float64[]
     ys = Float64[]
@@ -60,6 +62,8 @@ function find_current_segment(localization_state::MyLocalizationType, all_segs::
     end
     return nothing  # Return nothing if no segment is found.
 end
+
+## Ellie Chason - end - ##
 
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel)
     # set up stuff
