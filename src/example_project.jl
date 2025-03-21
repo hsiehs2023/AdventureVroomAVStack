@@ -82,6 +82,18 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     end
 end
 
+# Emily
+function collision_constraint(Body1, Body2)
+    # based on shape of vehicle (which I don't fully understand at this point) ensure that bodies do not
+    # overlap
+end
+
+# Emily
+function straight_lane_constraint(X, outer_bound, inner_bound)
+    # represent lane boundaries as halfspaces and require vehicle to remain within them
+    # we will need different lane constraint functions depending on shape of lane boundaries (curved vs. straight)
+end
+
 function decision_making(localization_state_channel, 
         perception_state_channel, 
         map, 
