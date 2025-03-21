@@ -86,6 +86,74 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     end
 end
 
+# -- Sung-Lin --
+"""
+Process raw camera measurements to extract bounding boxes.
+"""
+function process_bounding_boxes(cam_meas_channel)
+    # TODO: Extract bounding boxes from camera measurements
+    processed_detections = []
+    return processed_detections
+end
+
+"""
+Predict the future state of an object based on the motion model.
+Uses the state transition function f(x) from EKF implementation.
+"""
+function predict_object_state(obj_state, Δt)
+    #TODO: implement state transition function
+    # [p1, p2, θ, v, l, w, h] -> [p1 + Δt*v*cos(θ), p2 + Δt*v*sin(θ), θ, v, l, w, h]
+    # Update covariance using Jacobian
+    return obj_state
+end
+
+"""
+Project 3D object state to 2D bounding box in image coordinates.
+This is the measurement function h(x) from the EKF implementation.
+"""
+function project_state_to_bbox(obj_state, localization_state, camera_params)
+    # TODO: Implement the measurement function that projects 3D state to 2D bbox
+    # 1. Calculate 3D bounding box corners
+    # 2. Transform to camera coordinates
+    # 3. Project to image plane
+    # 4. Calculate bounding box extremes
+    return [0.0, 0.0, 0.0, 0.0]
+end
+
+"""
+Update track state using Kalman filter update step with new detection.
+"""
+function update_track_with_detection(track, detection)
+    # TODO: Implement Kalman filter update step
+    # 1. Calculate innovation (measurement residual)
+    # 2. Calculate Kalman gain
+    # 3. Update state and covariance
+    return track 
+end
+
+"""
+Initialize a new track from a detection.
+"""
+function initialize_new_track(detection, next_id)
+    # TODO: Implement new track initialization
+    # 1. Estimate initial state from detection
+    # 2. Set initial covariance (high uncertainty)
+    # 3. Return new ObjectState
+    return nothing
+end
+
+# Emily
+function collision_constraint(Body1, Body2)
+    # based on shape of vehicle (which I don't fully understand at this point) ensure that bodies do not
+    # overlap
+end
+
+# Emily
+function straight_lane_constraint(X, outer_bound, inner_bound)
+    # represent lane boundaries as halfspaces and require vehicle to remain within them
+    # we will need different lane constraint functions depending on shape of lane boundaries (curved vs. straight)
+end
+
 function decision_making(localization_state_channel, 
         perception_state_channel, 
         map, 
