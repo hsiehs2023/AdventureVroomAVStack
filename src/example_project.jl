@@ -8,6 +8,70 @@ struct MyPerceptionType
     field2::Float64
 end
 
+#Performs routing on current segment found from ground truth position (development only)
+function routing(gt_channel, target_segment_id::Int, map::Dict{Int, RoadSegment})
+    #Idea 1 for finding current position
+    gt_meas = fetch(gt_channel)
+    pos = gt_meas.position
+    
+    #Idea 2 for finding current position
+    current_state = fetch(state_channel)
+    pos = current_state.q[5:6]
+
+    current_segment_id = find_current_segment(pos, map)
+
+    println("Current Segment: ", current_segment_id)
+    println("Target Segment: ", target_segment_id)
+
+    path = find_shortest_path(target_segment_id, map)
+
+    return path
+end
+
+# Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
+function find_shortest_path(target_segment_id::Int, map::Dict{Int, RoadSegment})
+    queue = [current_segment_id]
+    visited = Set{Int}(current_segment_id)
+    prev = Dict{Int, Int}()
+    
+    found = false
+    # BFS
+    while !isempty(queue)
+        current = popfirst!(queue)
+        if current == target_segment_id
+            found = true
+            break
+        end
+        for child in map[current].children
+            if child ∉ visited
+                push!(queue, child)
+                push!(visited, child)
+                prev[child] = current
+            end
+        end
+    end
+    
+    # If no path was found, return an empty array.
+    if !found
+        @warn "No path found from segment $current_segment_id to $target_segment_id."
+        return RoadSegment[]
+    end
+    
+    # Reconstruct the path
+    path_ids = Int[]
+    seg_id = target_segment_id
+    while seg_id != current_segment_id
+        push!(path_ids, seg_id)
+        seg_id = prev[seg_id]
+    end
+    push!(path_ids, current_segment_id)
+    reverse!(path_ids)
+    
+    # Return the path as an array of RoadSegment objects.
+    return [map[id] for id in path_ids]
+end
+
+
 function localize(gps_channel, imu_channel, localization_state_channel)
     # Set up algorithm / initialize variables
     while true
@@ -34,33 +98,22 @@ end
 
 ## Ellie Chason - start - ##
 
-function compute_bbox(seg::RoadSegment)
-    xs = Float64[]
-    ys = Float64[]
-    for lb in seg.lane_boundaries
-        push!(xs, lb.pt_a[1])
-        push!(ys, lb.pt_a[2])
-        push!(xs, lb.pt_b[1])
-        push!(ys, lb.pt_b[2])
-    end
-    return (minimum(xs), maximum(xs), minimum(ys), maximum(ys))
-end
+# Based off reached_target in map.jl
+function find_current_segment(pos::SVector{2,Float64}, map::Dict{Int, RoadSegment})
+    for (seg_id, seg) in map
+        A = seg.lane_boundaries[2].pt_a
+        B = seg.lane_boundaries[2].pt_b
+        C = seg.lane_boundaries[3].pt_a
+        D = seg.lane_boundaries[3].pt_b
+        min_x = min(A[1], B[1], C[1], D[1])
+        max_x = max(A[1], B[1], C[1], D[1])
+        min_y = min(A[2], B[2], C[2], D[2])
+        max_y = max(A[2], B[2], C[2], D[2])
 
-function point_in_bbox(pos::SVector{2,Float64}, bbox::Tuple{Float64,Float64,Float64,Float64})
-    x, y = pos[1], pos[2]
-    xmin, xmax, ymin, ymax = bbox
-    return (xmin ≤ x ≤ xmax) && (ymin ≤ y ≤ ymax)
-end
-
-function find_current_segment(localization_state::MyLocalizationType, all_segs::Dict{Int, RoadSegment})
-    pos = SVector{2,Float64}(Float64(localization_state.field1), localization_state.field2)
-    for (id, seg) in all_segs
-        bbox = compute_bbox(seg)
-        if point_in_bbox(pos, bbox)
-            return id
+        if min_x ≤ pos[1] ≤ max_x && min_y ≤ pos[2] ≤ max_y
+            return seg_id
         end
     end
-    return nothing  # Return nothing if no segment is found.
 end
 
 ## Ellie Chason - end - ##
