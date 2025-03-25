@@ -10,6 +10,7 @@ end
 
 function localize(gps_channel, imu_channel, localization_state_channel)
     # Set up algorithm / initialize variables
+
     while true
         fresh_gps_meas = []
         while isready(gps_channel)
@@ -23,6 +24,76 @@ function localize(gps_channel, imu_channel, localization_state_channel)
         end
         
         # process measurements
+        gt_states = [zeros(13),] # ground truth states that we will try to estimate
+        timesteps = []
+        μs = [zeros(13),]
+
+        #TODO what should this matrix be???
+        Σs = Matrix{Float64}[Diagonal([5,5,3,1.0,5,5,3,1.0,5,5,3,1.0,5]),]
+        x_prev = [zeros(13),]
+        zs = Vector{Float64}[]
+
+        for k = 1:10 
+            linear_velocity = fresh_imu_meas[end].linear_vel
+            angular_velocity = fresh_imu_meas[end].angular_vel
+            Δ = 0.1
+            position = [fresh_gps_meas[end].long, fresh_gps_meas[end].long,]
+
+            #TODO HOW DO WE DO THIS
+            q = fresh_gps_meas[end].heading
+            xₖ = rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
+            x_prev = xₖ
+            u_prev = uₖ
+            zₖ = h(xₖ) + sqrt(meas_var) * randn(rng, 2)
+    
+            """
+            xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
+            A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
+            B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
+            L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
+            c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
+            μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
+            = f(μₖ₋₁, mₖ, 0, Δ)
+            Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
+            C = ∇ₓ h(μ̂), 
+            d = h(μ̂) - Cμ̂
+            Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
+            μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
+            """
+            A = jac_fx(μs[end], mₖ, zeros(2), Δ)
+            B = jac_fu(μs[end], mₖ, zeros(2), Δ)
+            L = jac_fω(μs[end], mₖ, zeros(2), Δ)
+            c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end] - B*mₖ - L*zeros(2)
+            μ̂ = A*μs[end] + B*mₖ + L*zeros(2) + c
+            Σ̂ = A*Σs[end]*A' + B*proc_cov*B' + L*dist_cov*L'
+            C = jac_hx(μ̂)
+            d = h(μ̂) - C*μ̂
+            Σ = (Σ̂ \ I + C' * (meas_var \ I) * C) \ I
+            μ = Σ*((Σ̂ \ I) *μ̂ + C'*(meas_var \ I)*(zₖ - d))
+    
+            # TODO : perform update on Σ, μ
+            # μ = ...
+            # Σ = ...
+    
+            push!(μs, μ)
+            push!(Σs, Σ)
+            push!(zs, zₖ)
+            push!(gt_states, xₖ)
+            push!(timesteps, Δ)
+            if output
+                println("Timestep ", k, ":")
+                println("   Ground truth (x,y): ", xₖ[1:2])
+                println("   Estimated (x,y): ", μ[1:2])
+                println("   Ground truth v: ", xₖ[3])
+                println("   estimated v: ", μ[3])
+                println("   Ground truth θ: ", xₖ[4])
+                println("   estimated θ: ", μ[4])
+                println("   measurement received: ", zₖ)
+                println("   Uncertainty measure (det(cov)): ", det(Σ))
+            end
+        end
+
+
 
         localization_state = MyLocalizationType(0,0.0)
         if isready(localization_state_channel)
