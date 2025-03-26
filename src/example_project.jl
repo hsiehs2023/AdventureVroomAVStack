@@ -8,70 +8,6 @@ struct MyPerceptionType
     field2::Float64
 end
 
-#Performs routing on current segment found from ground truth position (development only)
-function routing(gt_channel, target_segment_id::Int, map::Dict{Int, RoadSegment})
-    #Idea 1 for finding current position
-    gt_meas = fetch(gt_channel)
-    pos = gt_meas.position
-    
-    #Idea 2 for finding current position
-    current_state = fetch(state_channel)
-    pos = current_state.q[5:6]
-
-    current_segment_id = find_current_segment(pos, map)
-
-    println("Current Segment: ", current_segment_id)
-    println("Target Segment: ", target_segment_id)
-
-    path = find_shortest_path(target_segment_id, map)
-
-    return path
-end
-
-# Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
-function find_shortest_path(target_segment_id::Int, map::Dict{Int, RoadSegment})
-    queue = [current_segment_id]
-    visited = Set{Int}(current_segment_id)
-    prev = Dict{Int, Int}()
-    
-    found = false
-    # BFS
-    while !isempty(queue)
-        current = popfirst!(queue)
-        if current == target_segment_id
-            found = true
-            break
-        end
-        for child in map[current].children
-            if child ∉ visited
-                push!(queue, child)
-                push!(visited, child)
-                prev[child] = current
-            end
-        end
-    end
-    
-    # If no path was found, return an empty array.
-    if !found
-        @warn "No path found from segment $current_segment_id to $target_segment_id."
-        return RoadSegment[]
-    end
-    
-    # Reconstruct the path
-    path_ids = Int[]
-    seg_id = target_segment_id
-    while seg_id != current_segment_id
-        push!(path_ids, seg_id)
-        seg_id = prev[seg_id]
-    end
-    push!(path_ids, current_segment_id)
-    reverse!(path_ids)
-    
-    # Return the path as an array of RoadSegment objects.
-    return [map[id] for id in path_ids]
-end
-
-
 function localize(gps_channel, imu_channel, localization_state_channel)
     # Set up algorithm / initialize variables
     while true
@@ -96,28 +32,6 @@ function localize(gps_channel, imu_channel, localization_state_channel)
     end 
 end
 
-## Ellie Chason - start - ##
-
-# Based off reached_target in map.jl
-function find_current_segment(pos::SVector{2,Float64}, map::Dict{Int, RoadSegment})
-    for (seg_id, seg) in map
-        A = seg.lane_boundaries[2].pt_a
-        B = seg.lane_boundaries[2].pt_b
-        C = seg.lane_boundaries[3].pt_a
-        D = seg.lane_boundaries[3].pt_b
-        min_x = min(A[1], B[1], C[1], D[1])
-        max_x = max(A[1], B[1], C[1], D[1])
-        min_y = min(A[2], B[2], C[2], D[2])
-        max_y = max(A[2], B[2], C[2], D[2])
-
-        if min_x ≤ pos[1] ≤ max_x && min_y ≤ pos[2] ≤ max_y
-            return seg_id
-        end
-    end
-end
-
-## Ellie Chason - end - ##
-
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel)
     # set up stuff
     while true
@@ -139,115 +53,171 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     end
 end
 
-# -- Sung-Lin --
-"""
-Process raw camera measurements to extract bounding boxes.
-"""
-function process_bounding_boxes(cam_meas_channel)
-    # TODO: Extract bounding boxes from camera measurements
-    processed_detections = []
-    return processed_detections
+function get_segment_center(map, seg_id)
+    if !haskey(map, seg_id)
+        return SVector(0.0, 0.0)  # Default if segment not found
+    end
+    
+    seg = map[seg_id]
+    # Calculate center point from lane boundaries
+    if length(seg.lane_boundaries) >= 2
+        lb1 = seg.lane_boundaries[1]
+        lb2 = seg.lane_boundaries[end]
+        pt_a = lb1.pt_a
+        pt_b = lb1.pt_b
+        pt_c = lb2.pt_a
+        pt_d = lb2.pt_b
+        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
+    else
+        # Fallback if segment doesn't have enough lane boundaries
+        return SVector(0.0, 0.0)
+    end
 end
 
-"""
-Predict the future state of an object based on the motion model.
-Uses the state transition function f(x) from EKF implementation.
-"""
-function predict_object_state(obj_state, Δt)
-    #TODO: implement state transition function
-    # [p1, p2, θ, v, l, w, h] -> [p1 + Δt*v*cos(θ), p2 + Δt*v*sin(θ), θ, v, l, w, h]
-    # Update covariance using Jacobian
-    return obj_state
+function find_nearest_segment(map, position)
+    # Find the nearest road segment to the given position
+    # position is assumed to be a 2D vector (x, y)
+    
+    nearest_segment_id = -1
+    min_distance = Inf
+    
+    for (seg_id, segment) in map
+        # Calculate distances to all lane boundaries in this segment
+        for boundary in segment.lane_boundaries
+            # Calculate distance to line segment between pt_a and pt_b
+            pt_a = boundary.pt_a
+            pt_b = boundary.pt_b
+            
+            # Vector from pt_a to pt_b
+            v_ab = pt_b - pt_a
+            # Vector from pt_a to position
+            v_ap = position - pt_a
+            
+            # Calculate projection of v_ap onto v_ab
+            len_ab_squared = sum(v_ab .^ 2)
+            
+            # Avoid division by zero
+            if len_ab_squared < 1e-10
+                continue
+            end
+            
+            # Calculate projection parameter
+            t = max(0, min(1, sum(v_ap .* v_ab) / len_ab_squared))
+            
+            # Calculate closest point on the line segment
+            closest_point = pt_a + t * v_ab
+            
+            # Calculate distance to the closest point
+            distance = norm(position - closest_point)
+            
+            if distance < min_distance
+                min_distance = distance
+                nearest_segment_id = seg_id
+            end
+        end
+    end
+    
+    return nearest_segment_id
 end
 
-"""
-Project 3D object state to 2D bounding box in image coordinates.
-This is the measurement function h(x) from the EKF implementation.
-"""
-function project_state_to_bbox(obj_state, localization_state, camera_params)
-    # TODO: Implement the measurement function that projects 3D state to 2D bbox
-    # 1. Calculate 3D bounding box corners
-    # 2. Transform to camera coordinates
-    # 3. Project to image plane
-    # 4. Calculate bounding box extremes
-    return [0.0, 0.0, 0.0, 0.0]
+function plan_route(map, current_segment_id, target_segment_id)
+    # Return empty route if we're already at the target
+    if current_segment_id == target_segment_id
+        return [current_segment_id]
+    end
+    
+    # A* search to find an efficient path
+    # Using a combination of path length and estimated distance to target as heuristic
+    function heuristic(seg_id)
+        # Calculate Euclidean distance between current segment and target
+        current_center = get_segment_center(map, seg_id)
+        target_center = get_segment_center(map, target_segment_id)
+        return norm(current_center - target_center)
+    end
+    
+    # Priority queue for A* - using tuple of (priority, segment_id, path)
+    # Priority = g + h where g = path length, h = heuristic estimate to goal
+    
+    # Using a simple Vector and sort it after each insertion
+    # Maybe will switch to a priority queue data structure
+    open_set = [(0.0 + heuristic(current_segment_id), current_segment_id, [current_segment_id])]
+    
+    # Track path costs (g values) and visited nodes
+    g_scores = Dict{Int, Float64}()
+    g_scores[current_segment_id] = 0.0
+    visited = Set{Int}()
+    
+    while !isempty(open_set)
+        # Get node with lowest f_score (priority)
+        sort!(open_set, by = x -> x[1])
+        (_, segment_id, path) = popfirst!(open_set)
+        
+        # Skip if already visited (found a better path)
+        if segment_id in visited
+            continue
+        end
+        
+        # Check if we reached the target
+        if segment_id == target_segment_id
+            return path
+        end
+        
+        push!(visited, segment_id)
+        
+        # Check if the segment has children
+        if haskey(map, segment_id)
+            current_g = g_scores[segment_id]
+            
+            for child_id in map[segment_id].children
+                # Calculate edge cost - can be sophisticated based on road properties
+                # Use 1.0 for standard edges for now
+                # and higher costs for special segments like intersections or stop signs
+                edge_cost = 1.0
+                
+                if haskey(map, child_id)
+                    if contains_lane_type(map[child_id], intersection)
+                        edge_cost = 2.0  # Intersections are more costly
+                    elseif contains_lane_type(map[child_id], stop_sign)
+                        edge_cost = 1.5  # Stop signs have medium cost
+                    elseif contains_lane_type(map[child_id], loading_zone)
+                        edge_cost = 0.5  # Prefer loading zones (target type)
+                    end
+                end
+                
+                # New path cost to this child
+                new_g = current_g + edge_cost
+                
+                # Only consider this path if it's better than any previous path to this node
+                if !haskey(g_scores, child_id) || new_g < g_scores[child_id]
+                    g_scores[child_id] = new_g
+                    new_path = vcat(path, [child_id])
+                    f_score = new_g + heuristic(child_id)
+                    push!(open_set, (f_score, child_id, new_path))
+                end
+            end
+        end
+    end
+    
+    # No path found
+    return Int[]
 end
-
-"""
-Update track state using Kalman filter update step with new detection.
-"""
-function update_track_with_detection(track, detection)
-    # TODO: Implement Kalman filter update step
-    # 1. Calculate innovation (measurement residual)
-    # 2. Calculate Kalman gain
-    # 3. Update state and covariance
-    return track 
-end
-
-"""
-Initialize a new track from a detection.
-"""
-function initialize_new_track(detection, next_id)
-    # TODO: Implement new track initialization
-    # 1. Estimate initial state from detection
-    # 2. Set initial covariance (high uncertainty)
-    # 3. Return new ObjectState
-    return nothing
-end
-
-# Emily
-function collision_constraint(Body1, Body2)
-    # based on shape of vehicle (which I don't fully understand at this point) ensure that bodies do not
-    # overlap
-end
-
-# Emily
-function straight_lane_constraint(X, outer_bound, inner_bound)
-    # represent lane boundaries as halfspaces and require vehicle to remain within them
-    # we will need different lane constraint functions depending on shape of lane boundaries (curved vs. straight)
-end
-
-# Gloria
-# function generateRoute(current_segment_id, target_road_segment_id, map)
-#     curr_segment = map[current_segment]
-#     target_segment = map[target_road_segment_id]
-#     to_visit = Queue(RoadSegment)
-#     path = []
-
-#     # TODO: implement simple BFS followed by A* search
-#     # while curr_segment != target_segment
-#     #     # dequeue the current path (array of integer segment ids)
-#     #     # enqueue all children of the current segment into to_visit
-#     #     # 
-#     # end
-
-#     return path
-# end
 
 function decision_making(localization_state_channel, 
-        perception_state_channel, 
-        map, 
-        target_road_segment_id, 
-        socket)
-    # do some setup
-    while true
-        latest_localization_state = fetch(localization_state_channel)
-        latest_perception_state = fetch(perception_state_channel)
+    perception_state_channel, 
+    map, 
+    target_road_segment_id, 
+    socket)
+# do some setup
+while true
+    latest_localization_state = fetch(localization_state_channel)
+    latest_perception_state = fetch(perception_state_channel)
 
-        # Routing
-        # Verification check that current_segment_id = where our localization says we are
-        # generateRoute(current_segment_id, target_road_segment_id, map)
-
-        # Trajectory Generation
-        # Use ipopt/ HW2 structure to express geometric costs and constraints
-
-
-        # PID Control
-        steering_angle = 0.0
-        target_vel = 0.0
-        cmd = (steering_angle, target_vel, true)
-        serialize(socket, cmd)
-    end
+    # figure out what to do ... setup motion planning problem etc
+    steering_angle = 0.0
+    target_vel = 0.0
+    cmd = (steering_angle, target_vel, true)
+    serialize(socket, cmd)
+end
 end
 
 function isfull(ch::Channel)
