@@ -208,6 +208,57 @@ function decision_making(localization_state_channel,
     target_road_segment_id, 
     socket)
 # do some setup
+current_route = Int[]
+current_segment_id = -1  # Will be determined from localization
+target_segment_id = target_road_segment_id
+route_index = 1
+
+
+# Control parameters
+default_speed = 5.0
+slow_speed = 2.0
+stop_distance = 10.0  # Distance to slow down when approaching target or intersection
+
+# Tracking the last known GPS position
+last_known_position = SVector(0.0, 0.0)
+vehicle_heading = 0.0
+
+# Helper function to calculate segment center
+function get_segment_center(seg_id)
+    if !haskey(map, seg_id)
+        return SVector(0.0, 0.0)  # Default if segment not found
+    end
+    
+    seg = map[seg_id]
+    # Calculate center point from lane boundaries
+    if length(seg.lane_boundaries) >= 2
+        lb1 = seg.lane_boundaries[1]
+        lb2 = seg.lane_boundaries[end]
+        pt_a = lb1.pt_a
+        pt_b = lb1.pt_b
+        pt_c = lb2.pt_a
+        pt_d = lb2.pt_b
+        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
+    else
+        # Fallback if segment doesn't have enough lane boundaries
+        return SVector(0.0, 0.0)
+    end
+end
+
+# Get direction to target from current position
+function get_direction_to_next_segment(current_id, next_id)
+    current_center = get_segment_center(current_id)
+    next_center = get_segment_center(next_id)
+    
+    # Calculate vector from current to next
+    direction_vector = next_center - current_center
+    
+    # Calculate angle in radians
+    angle = atan(direction_vector[2], direction_vector[1])
+    
+    return angle
+end
+
 while true
     latest_localization_state = fetch(localization_state_channel)
     latest_perception_state = fetch(perception_state_channel)
