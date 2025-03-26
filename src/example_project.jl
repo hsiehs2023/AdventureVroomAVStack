@@ -24,12 +24,24 @@ function localize(gps_channel, imu_channel, localization_state_channel)
         end
         
         # process measurements
+        #TODO change these values to reflect appropriate uncertainties for each type of measurement
+        proc_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         gt_states = [zeros(13),] # ground truth states that we will try to estimate
         timesteps = []
+
+        #TODO change these values to reflect appropriate uncertainties for each type of measurement
+        meas_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+        #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
+        #TODO add in these measurements into μs (velocities can remain 0)
+        alpha = fresh_gps_meas[end].heading
+        q = [cos(alpha/2), 0, 0, sin(alpha/2)]
         μs = [zeros(13),]
 
-        #TODO what should this matrix be???
-        Σs = Matrix{Float64}[Diagonal([5,5,3,1.0,5,5,3,1.0,5,5,3,1.0,5]),]
+        #what should this matrix be???
+        #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
+        Σs = Matrix{Float64}[Diagonal([50,50,30,10.0,50,50,30,10.0,50,50,30,10.0,50]),]
+
         x_prev = [zeros(13),]
         zs = Vector{Float64}[]
 
@@ -37,14 +49,15 @@ function localize(gps_channel, imu_channel, localization_state_channel)
             linear_velocity = fresh_imu_meas[end].linear_vel
             angular_velocity = fresh_imu_meas[end].angular_vel
             Δ = 0.1
-            position = [fresh_gps_meas[end].long, fresh_gps_meas[end].long,]
+            position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
 
-            #TODO HOW DO WE DO THIS
-            q = fresh_gps_meas[end].heading
+            alpha = fresh_gps_meas[end].heading
+            q = [cos(alpha/2), 0, 0, sin(alpha/2)]
+
+            # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
             xₖ = rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
             x_prev = xₖ
-            u_prev = uₖ
-            zₖ = h(xₖ) + sqrt(meas_var) * randn(rng, 2)
+            zₖ = h_gps(xₖ)
     
             """
             xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
