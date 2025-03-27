@@ -36,7 +36,7 @@ function localize(gps_channel, imu_channel, localization_state_channel)
         #TODO add in these measurements into μs (velocities can remain 0)
         alpha = fresh_gps_meas[end].heading
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
-        μs = [zeros(13),]
+        μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel])
 
         #what should this matrix be???
         #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
@@ -73,20 +73,14 @@ function localize(gps_channel, imu_channel, localization_state_channel)
             Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
             μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
             """
-            A = jac_fx(μs[end], mₖ, zeros(2), Δ)
-            B = jac_fu(μs[end], mₖ, zeros(2), Δ)
-            L = jac_fω(μs[end], mₖ, zeros(2), Δ)
-            c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end] - B*mₖ - L*zeros(2)
-            μ̂ = A*μs[end] + B*mₖ + L*zeros(2) + c
-            Σ̂ = A*Σs[end]*A' + B*proc_cov*B' + L*dist_cov*L'
+            A = Jac_f_x(μs[end], Δ)
+            c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end]
+            μ̂ = A*μs[end] + c
+            Σ̂ = A*Σs[end]*A'
             C = jac_hx(μ̂)
             d = h(μ̂) - C*μ̂
             Σ = (Σ̂ \ I + C' * (meas_var \ I) * C) \ I
             μ = Σ*((Σ̂ \ I) *μ̂ + C'*(meas_var \ I)*(zₖ - d))
-    
-            # TODO : perform update on Σ, μ
-            # μ = ...
-            # Σ = ...
     
             push!(μs, μ)
             push!(Σs, Σ)
