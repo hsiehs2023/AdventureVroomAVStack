@@ -10,8 +10,31 @@ end
 
 function localize(gps_channel, imu_channel, localization_state_channel)
     # Set up algorithm / initialize variables
+    # process measurements
+    #TODO change these values to reflect appropriate uncertainties for each type of measurement
+    proc_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    gt_states = [zeros(13),] # ground truth states that we will try to estimate
+    timesteps = []
 
-    while true
+    #TODO change these values to reflect appropriate uncertainties for each type of measurement
+    meas_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+
+    #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
+    #TODO add in these measurements into μs (velocities can remain 0)
+    alpha = fresh_gps_meas[end].heading
+    q = [cos(alpha/2), 0, 0, sin(alpha/2)]
+    # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
+    μs = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]
+
+    #what should this matrix be???
+    #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
+    Σs = Matrix{Float64}[Diagonal([50,50,30,10.0,50,50,30,10.0,50,50,30,10.0,50]),]
+
+    x_prev = zeros(13)
+    zs = Vector{Float64}[]
+
+    # while true
+    for k = 1:10 
         fresh_gps_meas = []
         while isready(gps_channel)
             meas = take!(gps_channel)
@@ -23,81 +46,57 @@ function localize(gps_channel, imu_channel, localization_state_channel)
             push!(fresh_imu_meas, meas)
         end
         
-        # process measurements
-        #TODO change these values to reflect appropriate uncertainties for each type of measurement
-        proc_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        gt_states = [zeros(13),] # ground truth states that we will try to estimate
-        timesteps = []
+        linear_velocity = fresh_imu_meas[end].linear_vel
+        angular_velocity = fresh_imu_meas[end].angular_vel
+        Δ = 0.1
+        position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
 
-        #TODO change these values to reflect appropriate uncertainties for each type of measurement
-        meas_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-        #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
-        #TODO add in these measurements into μs (velocities can remain 0)
         alpha = fresh_gps_meas[end].heading
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
-        μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel])
 
-        #what should this matrix be???
-        #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
-        Σs = Matrix{Float64}[Diagonal([50,50,30,10.0,50,50,30,10.0,50,50,30,10.0,50]),]
+        # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
+        xₖ = rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
+        x_prev = xₖ
+        zₖ = h_gps(xₖ)
 
-        x_prev = [zeros(13),]
-        zs = Vector{Float64}[]
+        """
+        xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
+        A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
+        B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
+        L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
+        c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
+        μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
+        = f(μₖ₋₁, mₖ, 0, Δ)
+        Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
+        C = ∇ₓ h(μ̂), 
+        d = h(μ̂) - Cμ̂
+        Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
+        μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
+        """
+        A = Jac_f_x(μs[end], Δ)
+        c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end]
+        μ̂ = A*μs[end] + c
+        Σ̂ = A*Σs[end]*A'
+        C = jac_hx(μ̂)
+        d = h(μ̂) - C*μ̂
+        Σ = (Σ̂ \ I + C' * (meas_var \ I) * C) \ I
+        μ = Σ*((Σ̂ \ I) *μ̂ + C'*(meas_var \ I)*(zₖ - d))
 
-        for k = 1:10 
-            linear_velocity = fresh_imu_meas[end].linear_vel
-            angular_velocity = fresh_imu_meas[end].angular_vel
-            Δ = 0.1
-            position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
-
-            alpha = fresh_gps_meas[end].heading
-            q = [cos(alpha/2), 0, 0, sin(alpha/2)]
-
-            # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
-            xₖ = rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
-            x_prev = xₖ
-            zₖ = h_gps(xₖ)
-    
-            """
-            xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
-            A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
-            B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
-            L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
-            c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
-            μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
-            = f(μₖ₋₁, mₖ, 0, Δ)
-            Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
-            C = ∇ₓ h(μ̂), 
-            d = h(μ̂) - Cμ̂
-            Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
-            μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
-            """
-            A = Jac_f_x(μs[end], Δ)
-            c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end]
-            μ̂ = A*μs[end] + c
-            Σ̂ = A*Σs[end]*A'
-            C = jac_hx(μ̂)
-            d = h(μ̂) - C*μ̂
-            Σ = (Σ̂ \ I + C' * (meas_var \ I) * C) \ I
-            μ = Σ*((Σ̂ \ I) *μ̂ + C'*(meas_var \ I)*(zₖ - d))
-    
-            push!(μs, μ)
-            push!(Σs, Σ)
-            push!(zs, zₖ)
-            push!(gt_states, xₖ)
-            push!(timesteps, Δ)
-            if output
-                println("Timestep ", k, ":")
-                println("   Ground truth (x,y): ", xₖ[1:2])
-                println("   Estimated (x,y): ", μ[1:2])
-                println("   Ground truth v: ", xₖ[3])
-                println("   estimated v: ", μ[3])
-                println("   Ground truth θ: ", xₖ[4])
-                println("   estimated θ: ", μ[4])
-                println("   measurement received: ", zₖ)
-                println("   Uncertainty measure (det(cov)): ", det(Σ))
-            end
+        push!(μs, μ)
+        push!(Σs, Σ)
+        push!(zs, zₖ)
+        push!(gt_states, xₖ)
+        push!(timesteps, Δ)
+        if output
+            println("Timestep ", k, ":")
+            println("   Ground truth (x,y): ", xₖ[1:2])
+            println("   Estimated (x,y): ", μ[1:2])
+            println("   Ground truth v: ", xₖ[3])
+            println("   estimated v: ", μ[3])
+            println("   Ground truth θ: ", xₖ[4])
+            println("   estimated θ: ", μ[4])
+            println("   measurement received: ", zₖ)
+            println("   Uncertainty measure (det(cov)): ", det(Σ))
         end
 
 
