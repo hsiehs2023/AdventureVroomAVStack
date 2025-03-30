@@ -1,4 +1,5 @@
 struct MyLocalizationType
+    # TODO: add timestamp and perhaps orientation
     field1::Int
     field2::Float64
 end
@@ -8,7 +9,8 @@ struct MyPerceptionType
     field2::Float64
 end
 
-function localize(gps_channel, imu_channel, localization_state_channel)
+function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
+    print("IN localization")
     # Set up algorithm / initialize variables
     # process measurements
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
@@ -17,14 +19,7 @@ function localize(gps_channel, imu_channel, localization_state_channel)
     timesteps = []
 
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
-    meas_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-    #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
-    #TODO add in these measurements into μs (velocities can remain 0)
-    alpha = fresh_gps_meas[end].heading
-    q = [cos(alpha/2), 0, 0, sin(alpha/2)]
-    # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
-    μs = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]
+    meas_cov = Diagonal([0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
 
     #what should this matrix be???
     #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
@@ -35,29 +30,47 @@ function localize(gps_channel, imu_channel, localization_state_channel)
 
     # while true
     for k = 1:10 
+        fetch(shutdown_channel) && break
         fresh_gps_meas = []
+        # println("Channel size: ", length(gps_channel))
+        # println("taking a meas")
+        # meas = take!(gps_channel)
+        # println(meas)
+        while !isready(gps_channel)
+            sleep(0.002)
+        end
+        
         while isready(gps_channel)
+            fetch(shutdown_channel) && break
+            print("read some gps\n")
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
         fresh_imu_meas = []
         while isready(imu_channel)
+            fetch(shutdown_channel) && break
+            print("read some imu\n")
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
-        
+
+        #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
+        #TODO add in these measurements into μs (velocities can remain 0)
+        alpha = fresh_gps_meas[end].heading
+        q = [cos(alpha/2), 0, 0, sin(alpha/2)]
+        # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
+        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
         linear_velocity = fresh_imu_meas[end].linear_vel
         angular_velocity = fresh_imu_meas[end].angular_vel
         Δ = 0.1
         position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
-
         alpha = fresh_gps_meas[end].heading
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
 
         # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
-        xₖ = rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
+        xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
         x_prev = xₖ
-        zₖ = h_gps(xₖ)
+        zₖ = VehicleSim.h_gps(xₖ)
 
         """
         xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
@@ -73,21 +86,30 @@ function localize(gps_channel, imu_channel, localization_state_channel)
         Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
         μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
         """
-        A = Jac_f_x(μs[end], Δ)
-        c = f(μs[end], mₖ, zeros(2), Δ) - A*μs[end]
-        μ̂ = A*μs[end] + c
-        Σ̂ = A*Σs[end]*A'
-        C = jac_hx(μ̂)
-        d = h(μ̂) - C*μ̂
-        Σ = (Σ̂ \ I + C' * (meas_var \ I) * C) \ I
-        μ = Σ*((Σ̂ \ I) *μ̂ + C'*(meas_var \ I)*(zₖ - d))
+        A = VehicleSim.Jac_x_f(μs[end], Δ)
+        b = VehicleSim.f(μs[end], Δ) - A*μs[end]
+        μ_hat= A*μs[end] + b
+        Σ_hat = A*Σs[end]*A'
+        C = VehicleSim.Jac_h_gps(μ_hat)
+        d = VehicleSim.h_gps(μ_hat) - C*μ_hat
+        println("HEre2")
+        println(length(C))
+        println(length(meas_cov))
+        println(length(Σ_hat))
+        println(length())
 
+        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+        Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
+
+        println("hello")
+        μ = Σ*((Σ_hat \ I) *μ_hat + C'*(meas_var \ I)*(zₖ - d))
+        println("Here4")
         push!(μs, μ)
         push!(Σs, Σ)
         push!(zs, zₖ)
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
-        if output
+        if true
             println("Timestep ", k, ":")
             println("   Ground truth (x,y): ", xₖ[1:2])
             println("   Estimated (x,y): ", μ[1:2])
@@ -111,7 +133,7 @@ end
 
 ## Ellie Chason - start - ##
 
-function compute_bbox(seg::RoadSegment)
+function compute_bbox(seg::VehicleSim.RoadSegment)
     xs = Float64[]
     ys = Float64[]
     for lb in seg.lane_boundaries
@@ -129,7 +151,7 @@ function point_in_bbox(pos::SVector{2,Float64}, bbox::Tuple{Float64,Float64,Floa
     return (xmin ≤ x ≤ xmax) && (ymin ≤ y ≤ ymax)
 end
 
-function find_current_segment(localization_state::MyLocalizationType, all_segs::Dict{Int, RoadSegment})
+function find_current_segment(localization_state::MyLocalizationType, all_segs::Dict{Int, VehicleSim.RoadSegment})
     pos = SVector{2,Float64}(Float64(localization_state.field1), localization_state.field2)
     for (id, seg) in all_segs
         bbox = compute_bbox(seg)
@@ -291,8 +313,11 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     cam_channel = Channel{CameraMeasurement}(32)
     gt_channel = Channel{GroundTruthMeasurement}(32)
 
-    #localization_state_channel = Channel{MyLocalizationType}(1)
+    localization_state_channel = Channel{MyLocalizationType}(1)
     #perception_state_channel = Channel{MyPerceptionType}(1)
+
+    shutdown_channel = Channel{Bool}(1)
+    put!(shutdown_channel, false)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
@@ -328,7 +353,30 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
         end
     end)
 
-    @async localize(gps_channel, imu_channel, localization_state_channel)
-    @async perception(cam_channel, localization_state_channel, perception_state_channel)
-    @async decision_making(localization_state_channel, perception_state_channel, map, socket)
+    @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
+    # @async perception(cam_channel, localization_state_channel, perception_state_channel)
+    # @async decision_making(localization_state_channel, perception_state_channel, map, socket)
+    # @async shutdown_listener(shutdown_channel)
+end
+
+function shutdown_listener(shutdown_channel)
+    info_string = 
+        "***************
+      CLIENT COMMANDS
+      ***************
+            -Make sure focus is on this terminal window. Then:
+            -Press 'q' to shutdown threads. 
+    "
+    @info info_string
+    while true
+        sleep(0.1)
+        key = get_c()
+
+        if key == 'q'
+            # terminate threads
+            take!(shutdown_channel)
+            put!(shutdown_channel, true)
+            break
+        end
+    end
 end
