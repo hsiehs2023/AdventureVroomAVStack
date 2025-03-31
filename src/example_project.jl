@@ -9,7 +9,7 @@ struct MyPerceptionType
     field2::Float64
 end
 
-function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
+function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
     print("IN localization")
     # Set up algorithm / initialize variables
     # process measurements
@@ -19,7 +19,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     timesteps = []
 
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
-    meas_cov = Diagonal([0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
+    meas_cov = Diagonal([0.2, 0.1, 0.1])
 
     #what should this matrix be???
     #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
@@ -52,6 +52,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             print("read some imu\n")
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
+        end
+        fresh_gt_meas = []
+        while isready(gt_channel)
+            fetch(shutdown_channel) && break
+            print("read some gt\n")
+            meas = take!(gt_channel)
+            push!(fresh_gt_meas, meas)
         end
 
         #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
@@ -92,18 +99,10 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         Σ_hat = A*Σs[end]*A'
         C = VehicleSim.Jac_h_gps(μ_hat)
         d = VehicleSim.h_gps(μ_hat) - C*μ_hat
-        println("HEre2")
-        println(length(C))
-        println(length(meas_cov))
-        println(length(Σ_hat))
-        println(length())
 
         # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
         Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
-
-        println("hello")
-        μ = Σ*((Σ_hat \ I) *μ_hat + C'*(meas_var \ I)*(zₖ - d))
-        println("Here4")
+        μ = Σ*((Σ_hat \ I) *μ_hat + C'*(meas_cov \ I)*(zₖ - d))
         push!(μs, μ)
         push!(Σs, Σ)
         push!(zs, zₖ)
@@ -111,12 +110,14 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         push!(timesteps, Δ)
         if true
             println("Timestep ", k, ":")
-            println("   Ground truth (x,y): ", xₖ[1:2])
-            println("   Estimated (x,y): ", μ[1:2])
-            println("   Ground truth v: ", xₖ[3])
-            println("   estimated v: ", μ[3])
-            println("   Ground truth θ: ", xₖ[4])
-            println("   estimated θ: ", μ[4])
+            #println("   Ground truth (x,y): ", xₖ[1:2])
+            println("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
+            println("   Estimated (x,y): ", μ[1:3])
+            #println("   Ground truth v: ", xₖ[3])
+            println("   estimated q: ", μ[4:7])
+            #println("   Ground truth θ: ", xₖ[4])
+            println("   estimated linear: ", μ[8:10])
+            println("   estimated angular: ", μ[11:13])
             println("   measurement received: ", zₖ)
             println("   Uncertainty measure (det(cov)): ", det(Σ))
         end
@@ -353,7 +354,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
         end
     end)
 
-    @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
+    @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
     # @async perception(cam_channel, localization_state_channel, perception_state_channel)
     # @async decision_making(localization_state_channel, perception_state_channel, map, socket)
     # @async shutdown_listener(shutdown_channel)
