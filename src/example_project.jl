@@ -296,125 +296,14 @@ while true
 
     fetch(shutdown_channel) && break
 
-        latest_localization_state = fetch(localization_state_channel)
-        latest_perception_state = fetch(perception_state_channel)
-    
-    # Extract GPS position from localization state
-    # In a real implementation, we would need to buffer and process the GPS measurements
-    if latest_localization_state != nothing
-        if typeof(latest_localization_state) <: MyLocalizationType
-            # If we're using our custom localization type
-            # This can contain processed GPS data already
-            current_segment_id = latest_localization_state.segment_id
-            last_known_position = latest_localization_state.position
-            vehicle_heading = latest_localization_state.heading
-        else
-            # For simplicity, assume the first field is a position vector
-            last_known_position = SVector(latest_localization_state.field1, latest_localization_state.field2)
-            vehicle_heading = 0.0  # Heading would come from IMU or processed GPS
-            
-            # Find current road segment based on GPS position
-            estimated_segment_id = find_nearest_segment(map, last_known_position)
-            current_segment_id = estimated_segment_id
-        end
-    end
-    
-    # If segment changed or no route, recalculate route
-    if current_segment_id > 0 && (isempty(current_route) || (current_segment_id != current_route[route_index] && !(route_index < length(current_route) && current_segment_id == current_route[route_index+1])))
-        current_route = plan_route(map, current_segment_id, target_segment_id)
-        route_index = 1
-        @info "New route planned: $current_route"
-    end
-    
-    # Simple logic for steering and velocity
+    latest_localization_state = fetch(localization_state_channel)
+    latest_perception_state = fetch(perception_state_channel)
+
+    # figure out what to do ... setup motion planning problem etc
     steering_angle = 0.0
-    target_vel = default_speed
-    
-    if !isempty(current_route) && route_index < length(current_route)
-        next_segment_id = current_route[route_index + 1]
-        
-        # Check if we've reached the next segment
-        if current_segment_id == next_segment_id
-            route_index += 1
-            if route_index < length(current_route)
-                next_segment_id = current_route[route_index + 1]
-            end
-        end
-        
-        # Get current and next segment to determine direction
-        if haskey(map, current_segment_id) && haskey(map, next_segment_id)
-            current_seg = map[current_segment_id]
-            next_seg = map[next_segment_id]
-            
-            # Calculate desired heading to the next segment
-            desired_heading = get_direction_to_next_segment(current_segment_id, next_segment_id)
-            
-            # Calculate steering based on the difference between current and desired heading
-            # This is a simple proportional controller
-            heading_error = desired_heading - vehicle_heading
-            # Normalize angle to [-π, π]
-            while heading_error > π
-                heading_error -= 2π
-            end
-            while heading_error < -π
-                heading_error += 2π
-            end
-            
-            # Apply proportional control with a gain
-            steering_angle = 0.5 * heading_error
-            
-            # Limit steering angle
-            steering_angle = max(-0.5, min(0.5, steering_angle))
-            
-            # Adjust speed based on segment type
-            if contains_lane_type(next_seg, intersection)
-                # Approaching intersection - slow down
-                target_vel = slow_speed
-            elseif contains_lane_type(next_seg, stop_sign)
-                # Approaching stop sign - slow down
-                target_vel = slow_speed
-            elseif next_segment_id == target_segment_id
-                # Approaching final destination
-                target_vel = slow_speed
-            end
-        end
-        
-        # Basic obstacle avoidance using perception
-        if latest_perception_state != nothing
-            if typeof(latest_perception_state) <: MyPerceptionType
-                # Using our custom perception type
-                if latest_perception_state.is_path_blocked
-                    target_vel = 0.0  # Stop if path is blocked
-                elseif latest_perception_state.min_distance < stop_distance
-                    # Slow down proportionally to obstacle distance
-                    target_vel = max(0.0, target_vel * (latest_perception_state.min_distance / stop_distance))
-                end
-            else
-                # Simplified - assumes field2 might contain distance to nearest obstacle
-                obstacle_distance = latest_perception_state.field2
-                if obstacle_distance < stop_distance
-                    target_vel = max(0, target_vel * (obstacle_distance / stop_distance))
-                end
-            end
-        end
-    else
-        # We've reached the end of the route or no route found
-        if current_segment_id == target_segment_id
-            # We've reached the destination - stop
-            target_vel = 0.0
-            @info "Reached target destination!"
-        else
-            # No valid route found - slow down
-            target_vel = slow_speed
-            @info "No valid route found from segment $current_segment_id to $target_segment_id"
-        end
-    end
-    
+    target_vel = 0.0
     cmd = (steering_angle, target_vel, true)
     serialize(socket, cmd)
-    
-    # Sleep a bit to prevent tight loop
-    sleep(0.01)
 end
 end
 
