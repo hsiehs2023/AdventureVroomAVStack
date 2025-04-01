@@ -9,7 +9,7 @@ struct MyPerceptionType
 end
 
 #Performs routing on current segment found from ground truth position (development only)
-function routing(gt_channel, target_segment_id::Int, map::Dict{Int, RoadSegment})
+function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
     #Idea 1 for finding current position
     gt_meas = fetch(gt_channel)
     pos = gt_meas.position
@@ -29,7 +29,7 @@ function routing(gt_channel, target_segment_id::Int, map::Dict{Int, RoadSegment}
 end
 
 # Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
-function find_shortest_path(target_segment_id::Int, map::Dict{Int, RoadSegment})
+function find_shortest_path(target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
     queue = [current_segment_id]
     visited = Set{Int}(current_segment_id)
     prev = Dict{Int, Int}()
@@ -54,7 +54,7 @@ function find_shortest_path(target_segment_id::Int, map::Dict{Int, RoadSegment})
     # If no path was found, return an empty array.
     if !found
         @warn "No path found from segment $current_segment_id to $target_segment_id."
-        return RoadSegment[]
+        return VehicleSim.RoadSegment[]
     end
     
     # Reconstruct the path
@@ -67,7 +67,7 @@ function find_shortest_path(target_segment_id::Int, map::Dict{Int, RoadSegment})
     push!(path_ids, current_segment_id)
     reverse!(path_ids)
     
-    # Return the path as an array of RoadSegment objects.
+    # Return the path as an array of VehicleSim.RoadSegment objects.
     return [map[id] for id in path_ids]
 end
 
@@ -99,7 +99,7 @@ end
 ## Ellie Chason - start - ##
 
 # Based off reached_target in map.jl
-function find_current_segment(pos::SVector{2,Float64}, map::Dict{Int, RoadSegment})
+function find_current_segment(pos, map::Dict{Int, VehicleSim.RoadSegment})
     for (seg_id, seg) in map
         A = seg.lane_boundaries[2].pt_a
         B = seg.lane_boundaries[2].pt_b
