@@ -9,31 +9,33 @@ struct MyPerceptionType
     field2::Float64
 end
 
+
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    print("IN localization")
+    println("IN localization")
     # Set up algorithm / initialize variables
     # process measurements
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
-    proc_cov = Diagonal([0.2, 0.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
     gt_states = [zeros(13),] # ground truth states that we will try to estimate
     timesteps = []
+    last_timestamp = time()
 
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
     meas_cov = Diagonal([0.2, 0.1, 0.1])
 
     #what should this matrix be???
     #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
-    Σs = Matrix{Float64}[Diagonal([50,50,30,10.0,50,50,30,10.0,50,50,30,10.0,50]),]
+    Σs = Matrix{Float64}[Diagonal([10, 10, 5, 2.0, 10, 10, 5, 2.0, 10, 10, 5, 2.0, 10]),]
 
     x_prev = zeros(13)
     zs = Vector{Float64}[]
 
     # while true
-    for k = 1:10 
+    for k = 1:10
         fetch(shutdown_channel) && break
         fresh_gps_meas = []
-        # println("Channel size: ", length(gps_channel))
-        # println("taking a meas")
+        #println("Channel size: ", length(gps_channel))
+        #println("taking a meas")
         # meas = take!(gps_channel)
         # println(meas)
         while !isready(gps_channel)
@@ -61,17 +63,20 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             push!(fresh_gt_meas, meas)
         end
 
+        # Dynamically calculate the time step Δ
+        current_timestamp = time()
+        Δ = current_timestamp - last_timestamp
+        last_timestamp = current_timestamp
+
         #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
         #TODO add in these measurements into μs (velocities can remain 0)
         alpha = fresh_gps_meas[end].heading
-        q = [cos(alpha/2), 0, 0, sin(alpha/2)]
         # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
-        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
+        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
         linear_velocity = fresh_imu_meas[end].linear_vel
         angular_velocity = fresh_imu_meas[end].angular_vel
-        Δ = 0.1
+        #Δ = 0.1
         position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
-        alpha = fresh_gps_meas[end].heading
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
 
         # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
@@ -96,18 +101,19 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         A = VehicleSim.Jac_x_f(μs[end], Δ)
         b = VehicleSim.f(μs[end], Δ) - A*μs[end]
         μ_hat= A*μs[end] + b
-        Σ_hat = A*Σs[end]*A'
+        Σ_hat = A*Σs[end]*A' + proc_cov
         C = VehicleSim.Jac_h_gps(μ_hat)
         d = VehicleSim.h_gps(μ_hat) - C*μ_hat
 
         # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
         Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
-        μ = Σ*((Σ_hat \ I) *μ_hat + C'*(meas_cov \ I)*(zₖ - d))
+        μ = Σ*(inv(Σ_hat) *μ_hat + C'*(inv(meas_cov))*(zₖ - d))
         push!(μs, μ)
         push!(Σs, Σ)
         push!(zs, zₖ)
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
+        #println("made it here")
         if true
             println("Timestep ", k, ":")
             #println("   Ground truth (x,y): ", xₖ[1:2])
