@@ -10,6 +10,34 @@ struct MyPerceptionType
 end
 
 
+function h_imu(x)
+    T_body_imu = VehicleSim.get_imu_transform()
+    T_imu_body = VehicleSim.invert_transform(T_body_imu)
+    R = T_imu_body[1:3, 1:3]
+    p = T_imu_body[1:3, end]
+    v_body = x[8:10]
+    ω_body = x[11:13]
+    ω_imu = R * ω_body
+    v_imu = R * v_body + cross(p, ω_imu)
+    return [v_imu; ω_imu]
+end
+
+
+function Jac_h_imu(x)
+    # Initialize a 6x13 zero matrix
+    H = zeros(6, 13)
+    
+    # Populate the Jacobian with the appropriate derivatives
+    H[1, 8] = 1.0  # ∂v_x / ∂x₈
+    H[2, 9] = 1.0  # ∂v_y / ∂x₉
+    H[3, 10] = 1.0 # ∂v_z / ∂x₁₀
+    H[4, 11] = 1.0 # ∂ω_x / ∂x₁₁
+    H[5, 12] = 1.0 # ∂ω_y / ∂x₁₂
+    H[6, 13] = 1.0 # ∂ω_z / ∂x₁₃
+    
+    return H
+end
+
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
     println("IN localization")
     # Set up algorithm / initialize variables
@@ -21,11 +49,12 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     last_timestamp = time()
 
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
-    meas_cov = Diagonal([0.2, 0.1, 0.1])
+    meas_cov = Diagonal([0.2, 0.1, 0.1, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
+    #meas_cov_imu = Diagonal([0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
 
     #what should this matrix be???
     #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
-    Σs = Matrix{Float64}[Diagonal([10, 10, 5, 2.0, 10, 10, 5, 2.0, 10, 10, 5, 2.0, 10]),]
+    Σs = Matrix{Float64}[Diagonal([25,25,25,0.01,0.01,0.01,0.01,1,1,1,0.01,0.01,0.01]),]
 
     x_prev = zeros(13)
     zs = Vector{Float64}[]
@@ -82,7 +111,10 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
         xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
         x_prev = xₖ
-        zₖ = VehicleSim.h_gps(xₖ)
+        zₖ_gps = VehicleSim.h_gps(xₖ)
+        zₖ_imu = h_imu(xₖ)
+        zₖ = vcat(zₖ_gps, zₖ_imu)
+
 
         """
         xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
@@ -102,8 +134,12 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         b = VehicleSim.f(μs[end], Δ) - A*μs[end]
         μ_hat= A*μs[end] + b
         Σ_hat = A*Σs[end]*A' + proc_cov
-        C = VehicleSim.Jac_h_gps(μ_hat)
-        d = VehicleSim.h_gps(μ_hat) - C*μ_hat
+        C_gps = VehicleSim.Jac_h_gps(μ_hat)
+        C_imu = Jac_h_imu(μ_hat)
+        C = vcat(C_gps, C_imu)
+        d_gps = VehicleSim.h_gps(μ_hat)
+        d_imu = h_imu(μ_hat)
+        d = vcat(d_gps, d_imu) - C*μ_hat
 
         # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
         Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
@@ -111,9 +147,21 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         push!(μs, μ)
         push!(Σs, Σ)
         push!(zs, zₖ)
+
+        #zₖ = h_imu(xₖ)
+        #C_imu = Jac_h_imu(μ_hat)
+        #d_imu = h_imu(μ_hat) - C_imu*μ_hat
+
+        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+        # Σ = inv(inv(Σ_hat) + C_imu' * inv(meas_cov_imu) * C_imu)
+        # μ = Σ*(inv(Σ_hat) *μ_hat + C_imu'*(inv(meas_cov_imu))*(zₖ - d_imu))
+        # push!(μs, μ)
+        # push!(Σs, Σ)
+        # push!(zs, zₖ)
+
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
-        #println("made it here")
+
         if true
             println("Timestep ", k, ":")
             #println("   Ground truth (x,y): ", xₖ[1:2])
