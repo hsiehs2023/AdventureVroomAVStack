@@ -59,35 +59,40 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     x_prev = zeros(13)
     zs = Vector{Float64}[]
 
-    # while true
-    for k = 1:10
-        fetch(shutdown_channel) && break
+    while true
+    # for k = 1:10
+        isready(shutdown_channel) && break
         fresh_gps_meas = []
         #println("Channel size: ", length(gps_channel))
         #println("taking a meas")
         # meas = take!(gps_channel)
         # println(meas)
         while !isready(gps_channel)
-            sleep(0.002)
+            sleep(0.001)
         end
         
         while isready(gps_channel)
-            fetch(shutdown_channel) && break
-            print("read some gps\n")
+            isready(shutdown_channel) && break
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
+
         fresh_imu_meas = []
+        while !isready(imu_channel)
+            sleep(0.001)
+        end
         while isready(imu_channel)
-            fetch(shutdown_channel) && break
-            print("read some imu\n")
+            isready(shutdown_channel) && break
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
+
         fresh_gt_meas = []
+        while !isready(gt_channel)
+            sleep(0.001)
+        end
         while isready(gt_channel)
-            fetch(shutdown_channel) && break
-            print("read some gt\n")
+            isready(shutdown_channel) && break
             meas = take!(gt_channel)
             push!(fresh_gt_meas, meas)
         end
@@ -163,17 +168,21 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         push!(timesteps, Δ)
 
         if true
-            println("Timestep ", k, ":")
-            #println("   Ground truth (x,y): ", xₖ[1:2])
-            println("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
-            println("   Estimated (x,y): ", μ[1:3])
-            #println("   Ground truth v: ", xₖ[3])
-            println("   estimated q: ", μ[4:7])
-            #println("   Ground truth θ: ", xₖ[4])
-            println("   estimated linear: ", μ[8:10])
-            println("   estimated angular: ", μ[11:13])
-            println("   measurement received: ", zₖ)
-            println("   Uncertainty measure (det(cov)): ", det(Σ))
+            # println("Timestep ", k, ":")
+            # #println("   Ground truth (x,y): ", xₖ[1:2])
+            # println("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
+            # println("   Estimated (x,y): ", μ[1:3])
+            # #println("   Ground truth v: ", xₖ[3])
+            # println("   estimated q: ", μ[4:7])
+            # #println("   Ground truth θ: ", xₖ[4])
+            # println("   estimated linear: ", μ[8:10])
+            # println("   estimated angular: ", μ[11:13])
+            # println("   measurement received: ", zₖ)
+            # println("   Uncertainty measure (det(cov)): ", det(Σ))
+
+            println("   Ground truth (x,y): ", μs[2][1:3])
+            println("   estimated: ", μ[1:3])
+
         end
 
 
@@ -372,12 +381,11 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     #perception_state_channel = Channel{MyPerceptionType}(1)
 
     shutdown_channel = Channel{Bool}(1)
-    put!(shutdown_channel, false)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
 
-    errormonitor(@async while true
+    error_mon = errormonitor(@async while true
         # This while loop reads to the end of the socket stream (makes sure you
         # are looking at the latest messages)
         sleep(0.001)
@@ -408,18 +416,23 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
         end
     end)
 
-    @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    # @async perception(cam_channel, localization_state_channel, perception_state_channel)
-    # @async decision_making(localization_state_channel, perception_state_channel, map, socket)
-    # @async shutdown_listener(shutdown_channel)
+    tasks = []
+    # push!(tasks, error_mon)
+    push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
+    # push!(@async perception(cam_channel, localization_state_channel, perception_state_channel))
+    # push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, map, socket))
+    push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
+
+    for t in tasks
+        wait(t)
+    end
 end
 
-function shutdown_listener(shutdown_channel)
+function shutdown_listener(shutdown_channel, tasks)
     info_string = 
         "***************
       CLIENT COMMANDS
       ***************
-            -Make sure focus is on this terminal window. Then:
             -Press 'q' to shutdown threads. 
     "
     @info info_string
@@ -429,9 +442,11 @@ function shutdown_listener(shutdown_channel)
 
         if key == 'q'
             # terminate threads
-            take!(shutdown_channel)
+            println("Terminating threads")
             put!(shutdown_channel, true)
-            break
+
+            
+            return
         end
     end
 end
