@@ -1,4 +1,5 @@
 struct MyLocalizationType
+    # TODO: add timestamp and perhaps orientation
     field1::Int
     field2::Float64
 end
@@ -34,29 +35,187 @@ function process_gt(
     end
 end
 
-function localize(
-        gps_channel, 
-        imu_channel, 
-        localization_state_channel, 
-        shutdown_channel)
+function h_imu(x)
+    T_body_imu = VehicleSim.get_imu_transform()
+    T_imu_body = VehicleSim.invert_transform(T_body_imu)
+    R = T_imu_body[1:3, 1:3]
+    p = T_imu_body[1:3, end]
+    v_body = x[8:10]
+    ω_body = x[11:13]
+    ω_imu = R * ω_body
+    v_imu = R * v_body + cross(p, ω_imu)
+    return [v_imu; ω_imu]
+end
+
+
+function Jac_h_imu(x)
+    # Initialize a 6x13 zero matrix
+    H = zeros(6, 13)
+    
+    # Populate the Jacobian with the appropriate derivatives
+    H[1, 8] = 1.0  # ∂v_x / ∂x₈
+    H[2, 9] = 1.0  # ∂v_y / ∂x₉
+    H[3, 10] = 1.0 # ∂v_z / ∂x₁₀
+    H[4, 11] = 1.0 # ∂ω_x / ∂x₁₁
+    H[5, 12] = 1.0 # ∂ω_y / ∂x₁₂
+    H[6, 13] = 1.0 # ∂ω_z / ∂x₁₃
+    
+    return H
+end
+
+function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
+    println("IN localization")
     # Set up algorithm / initialize variables
+    # process measurements
+    #TODO change these values to reflect appropriate uncertainties for each type of measurement
+    proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
+    gt_states = [zeros(13),] # ground truth states that we will try to estimate
+    timesteps = []
+    last_timestamp = time()
+
+    #TODO change these values to reflect appropriate uncertainties for each type of measurement
+    meas_cov = Diagonal([0.2, 0.1, 0.1, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
+    #meas_cov_imu = Diagonal([0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
+
+    #what should this matrix be???
+    #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
+    Σs = Matrix{Float64}[Diagonal([25,25,25,0.01,0.01,0.01,0.01,1,1,1,0.01,0.01,0.01]),]
+
+    x_prev = zeros(13)
+    zs = Vector{Float64}[]
+
     while true
-
-        fetch(shutdown_channel) && break
-
+    # for k = 1:10
+        isready(shutdown_channel) && break
         fresh_gps_meas = []
+        #println("Channel size: ", length(gps_channel))
+        #println("taking a meas")
+        # meas = take!(gps_channel)
+        # println(meas)
+        while !isready(gps_channel)
+            sleep(0.001)
+        end
+        
         while isready(gps_channel)
+            isready(shutdown_channel) && break
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
+
         fresh_imu_meas = []
+        while !isready(imu_channel)
+            sleep(0.001)
+        end
         while isready(imu_channel)
+            isready(shutdown_channel) && break
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
-        
-        # process measurements
-        take!(localization_state_channel)
+
+        fresh_gt_meas = []
+        while !isready(gt_channel)
+            sleep(0.001)
+        end
+        while isready(gt_channel)
+            isready(shutdown_channel) && break
+            meas = take!(gt_channel)
+            push!(fresh_gt_meas, meas)
+        end
+
+        # Dynamically calculate the time step Δ
+        current_timestamp = time()
+        Δ = current_timestamp - last_timestamp
+        last_timestamp = current_timestamp
+
+        #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
+        #TODO add in these measurements into μs (velocities can remain 0)
+        alpha = fresh_gps_meas[end].heading
+        # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
+        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
+        linear_velocity = fresh_imu_meas[end].linear_vel
+        angular_velocity = fresh_imu_meas[end].angular_vel
+        #Δ = 0.1
+        position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
+        q = [cos(alpha/2), 0, 0, sin(alpha/2)]
+
+        # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
+        xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
+        x_prev = xₖ
+        zₖ_gps = VehicleSim.h_gps(xₖ)
+        zₖ_imu = h_imu(xₖ)
+        zₖ = vcat(zₖ_gps, zₖ_imu)
+
+
+        """
+        xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
+        A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
+        B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
+        L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
+        c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
+        μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
+        = f(μₖ₋₁, mₖ, 0, Δ)
+        Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
+        C = ∇ₓ h(μ̂), 
+        d = h(μ̂) - Cμ̂
+        Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
+        μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
+        """
+        A = VehicleSim.Jac_x_f(μs[end], Δ)
+        b = VehicleSim.f(μs[end], Δ) - A*μs[end]
+        μ_hat= A*μs[end] + b
+        Σ_hat = A*Σs[end]*A' + proc_cov
+        C_gps = VehicleSim.Jac_h_gps(μ_hat)
+        C_imu = Jac_h_imu(μ_hat)
+        C = vcat(C_gps, C_imu)
+        d_gps = VehicleSim.h_gps(μ_hat)
+        d_imu = h_imu(μ_hat)
+        d = vcat(d_gps, d_imu) - C*μ_hat
+
+        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+        Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
+        μ = Σ*(inv(Σ_hat) *μ_hat + C'*(inv(meas_cov))*(zₖ - d))
+        push!(μs, μ)
+        push!(Σs, Σ)
+        push!(zs, zₖ)
+
+        #zₖ = h_imu(xₖ)
+        #C_imu = Jac_h_imu(μ_hat)
+        #d_imu = h_imu(μ_hat) - C_imu*μ_hat
+
+        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+        # Σ = inv(inv(Σ_hat) + C_imu' * inv(meas_cov_imu) * C_imu)
+        # μ = Σ*(inv(Σ_hat) *μ_hat + C_imu'*(inv(meas_cov_imu))*(zₖ - d_imu))
+        # push!(μs, μ)
+        # push!(Σs, Σ)
+        # push!(zs, zₖ)
+
+        push!(gt_states, xₖ)
+        push!(timesteps, Δ)
+
+        if true
+            # println("Timestep ", k, ":")
+            # #println("   Ground truth (x,y): ", xₖ[1:2])
+            # println("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
+            # println("   Estimated (x,y): ", μ[1:3])
+            # #println("   Ground truth v: ", xₖ[3])
+            # println("   estimated q: ", μ[4:7])
+            # #println("   Ground truth θ: ", xₖ[4])
+            # println("   estimated linear: ", μ[8:10])
+            # println("   estimated angular: ", μ[11:13])
+            # println("   measurement received: ", zₖ)
+            # println("   Uncertainty measure (det(cov)): ", det(Σ))
+
+            println("   Ground truth (x,y): ", μs[2][1:3])
+            println("   estimated: ", μ[1:3])
+
+        end
+
+
+
+        localization_state = MyLocalizationType(0,0.0)
+        if isready(localization_state_channel)
+            take!(localization_state_channel)
+        end
         put!(localization_state_channel, localization_state)
     end 
 end
@@ -325,17 +484,19 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     gt_channel = Channel{GroundTruthMeasurement}(32)
 
     localization_state_channel = Channel{MyLocalizationType}(1)
-    perception_state_channel = Channel{MyPerceptionType}(1)
+
     target_segment_channel = Channel{Int}(1)
+    #perception_state_channel = Channel{MyPerceptionType}(1)
+
     shutdown_channel = Channel{Bool}(1)
-    put!(shutdown_channel, false)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
 
-    put!(target_segment_channel, target_map_segment)
 
-    errormonitor(@async while true
+    put!(target_segment_channel, target_map_segment)
+    error_mon = errormonitor(@async while true
+
         # This while loop reads to the end of the socket stream (makes sure you
         # are looking at the latest messages)
         sleep(0.001)
@@ -376,29 +537,20 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                       shutdown_channel,
                       localization_state_channel,
                       perception_state_channel)
-    else
-        @async localize(gps_channel, 
-                    imu_channel, 
-                    localization_state_channel, 
-                    shutdown_channel)
 
-        @async perception(cam_channel, 
-                      localization_state_channel, 
-                      perception_state_channel, 
-                      shutdown_channel)
+    tasks = []
+    # push!(tasks, error_mon)
+    push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
+    # push!(@async perception(cam_channel, localization_state_channel, perception_state_channel))
+    # push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, map, socket))
+    push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
+
+    for t in tasks
+        wait(t)
     end
-
-
-
-    @async decision_making(localization_state_channel, 
-                           perception_state_channel, 
-                           target_segment_channel, 
-                           shutdown_channel,
-                           map, 
-                           socket)
 end
 
-function shutdown_listener(shutdown_channel)
+function shutdown_listener(shutdown_channel, tasks)
     info_string = 
         "***************
       CLIENT COMMANDS
@@ -413,9 +565,9 @@ function shutdown_listener(shutdown_channel)
 
         if key == 'q'
             # terminate threads
-            take!(shutdown_channel)
-            put!(shutdown_channel, true)
-            break
+            println("Terminating threads")
+            put!(shutdown_channel, true)     
+            return
         end
     end
 end
