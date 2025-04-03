@@ -456,30 +456,16 @@ function get_direction_to_next_segment(current_id, next_id)
     return angle
 end
 
-while true
-
-    fetch(shutdown_channel) && break
-
-    latest_localization_state = fetch(localization_state_channel)
-    latest_perception_state = fetch(perception_state_channel)
-
-    # figure out what to do ... setup motion planning problem etc
-    steering_angle = 0.0
-    target_vel = 0.0
-    cmd = (steering_angle, target_vel, true)
-    serialize(socket, cmd)
-end
-
 # --- begin motion planning ---
 # function to compute midpoints for a one lane road segment
 function compute_midpoints(segment)
-    x1 = segment.lane_boundaries[1].pt_a
-    y1 = segment.lane_boundaries[1].pt_b
-    x2 = segment.lane_boundaries[2].pt_a
-    y2 = segment.lane_boundaries[2].pt_b
-    x_mid = (x1 + x2)/2
-    y_mid = (y1 + y2)/2
-    [x_mid, y_mid]
+    a1 = segment.lane_boundaries[1].pt_a
+    b1 = segment.lane_boundaries[1].pt_b
+    a2 = segment.lane_boundaries[2].pt_a
+    b2 = segment.lane_boundaries[2].pt_b
+    a_mid = (a1 + a2)/2
+    b_mid = (b1 + b2)/2
+    [a_mid, b_mid] #2X2 matrix
 end
 #given a list of segments
 path = [] #this will be the list of segments returned by routing function
@@ -489,6 +475,66 @@ for id in path
     push!(polyline, pt)
 end
 #now we can do PID controller on polyline
+alpha = [0.0, 0.0]
+current_segment_index = 1
+
+while true
+
+    fetch(shutdown_channel) && break
+
+    latest_localization_state = fetch(localization_state_channel)
+    latest_perception_state = fetch(perception_state_channel)
+    c1 = latest_localization_state[1]
+    c2 = latest_localization_state[2]
+    θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state[4:7])
+    v = norm(latest_localization_state[8:9])
+
+    lookahead_radius = v * ls
+    current_segment = polyline[current_segment_index]
+    p1 = current_segment[1]
+    p2 = current_segment[2]
+    a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
+    b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
+    c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
+
+    discriminant = b^2 - 4 * a * c
+
+    if discriminant >= 0
+        sqrt_disc = sqrt(discriminant)
+        t_upper = (-b + sqrt_disc) / (2 * a)
+        t_lower = (-b - sqrt_disc) / (2 * a)
+        valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
+        t = isempty(valid_t) ? -1 : first(valid_t)
+    end
+
+    center = SVector(c1, c2)
+    q = SVector((t * (current_segment.p2 - current_segment.p1) + current_segment.p1)) - center
+
+    heading = [cos(θ); sin(θ)]
+    dot_value = dot(q, heading) / (norm(q) * norm(heading))
+    alpha = acos(clamp(dot_value, -1, 1))  # Angle magnitude
+
+    # Use cross product to determine sign
+    cross_value = heading[1] * q[2] - heading[2] * q[1]  # 2D cross product determinant
+    alpha *= sign(cross_value)
+
+    turn = atan((2 * L * sin(alpha)) / lookahead_radius)
+    result = [turn, 1.0]
+    if v > 6
+        result = [turn, -1.0]
+    end
+
+    # Format into cmd object and send cmd through socket
+    cmd = (steering_angle, target_velocity, true)
+    take!(control_ch)
+    put!(control_ch, result)
+
+    # figure out what to do ... setup motion planning problem etc
+    steering_angle = 0.0
+    target_vel = 0.0
+    cmd = (steering_angle, target_vel, true)
+    serialize(socket, cmd)
+end
 
 end
 
