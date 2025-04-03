@@ -131,11 +131,11 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         #TODO add in these measurements into μs (velocities can remain 0)
         alpha = fresh_gps_meas[end].heading
         # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
-        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
+        μs = [[fresh_gps_meas[end].lat, fresh_gps_meas[end].long, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
         linear_velocity = fresh_imu_meas[end].linear_vel
         angular_velocity = fresh_imu_meas[end].angular_vel
         #Δ = 0.1
-        position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
+        position = [fresh_gps_meas[end].lat, fresh_gps_meas[end].long, 1.0]
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
 
         # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
@@ -205,8 +205,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             # println("   measurement received: ", zₖ)
             # println("   Uncertainty measure (det(cov)): ", det(Σ))
 
-            println("   Ground truth (x,y): ", μs[2][1:3])
+            println("Hello")
+            println("   Ground truth (x,y): ", fresh_gt_meas[end].position)
             println("   estimated: ", μ[1:3])
+            println("   GT linear: ", fresh_gt_meas[end].velocity)
+            println("   estimated linear: ", μ[8:10])
+            println("   GT angular: ", fresh_gt_meas[end].angular_velocity)
+            println("   estimated angular: ", μ[11:13])
 
         end
 
@@ -537,6 +542,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                       shutdown_channel,
                       localization_state_channel,
                       perception_state_channel)
+    end
 
     tasks = []
     # push!(tasks, error_mon)
