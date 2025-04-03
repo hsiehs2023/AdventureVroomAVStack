@@ -481,6 +481,14 @@ function compute_midpoints(segment)
     y_mid = (y1 + y2)/2
     [x_mid, y_mid]
 end
+#given a list of segments
+path = [] #this will be the list of segments returned by routing function
+polyline = [] #polyline we create
+for id in path
+    pt = compute_midpoints(map[id])
+    push!(polyline, pt)
+end
+#now we can do PID controller on polyline
 
 end
 
