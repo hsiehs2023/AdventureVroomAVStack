@@ -469,6 +469,19 @@ while true
     cmd = (steering_angle, target_vel, true)
     serialize(socket, cmd)
 end
+
+# --- begin motion planning ---
+# function to compute midpoints for a one lane road segment
+function compute_midpoints(segment)
+    x1 = segment.lane_boundaries[1].pt_a
+    y1 = segment.lane_boundaries[1].pt_b
+    x2 = segment.lane_boundaries[2].pt_a
+    y2 = segment.lane_boundaries[2].pt_b
+    x_mid = (x1 + x2)/2
+    y_mid = (y1 + y2)/2
+    [x_mid, y_mid]
+end
+
 end
 
 function isfull(ch::Channel)
