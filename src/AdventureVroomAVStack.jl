@@ -3,6 +3,9 @@ module AdventureVroomAVStack
 using VehicleSim
 using Sockets
 using Serialization
+using StaticArrays
+using LinearAlgebra
+using Rotations
 
 include("client.jl")
 include("example_project.jl")

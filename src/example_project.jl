@@ -1,9 +1,24 @@
-struct MyLocalizationType
-    field1::Int
-    field2::Float64
+struct ObstacleDetection
+    position::SVector{3, Float64}    # estimated position
+    size::SVector{3, Float64}        # estimated size (length, width, height)
+    velocity::SVector{2, Float64}    # estimated velocity (x, y)
+    confidence::Float64              # detection confidence [0,1]
+    id::Int                          # tracking ID (if available, 0 otherwise)
+end
+
+struct LaneMarking
+    points::Vector{SVector{2, Float64}}  # points defining the lane marking
+    type::Symbol                         # :left, :right, :center
+    confidence::Float64                  # detection confidence [0,1]
 end
 
 struct MyPerceptionType
+    timestamp::Float64                    # timestamp of this perception state
+    obstacles::Vector{ObstacleDetection}  # detected obstacles
+    lane_markings::Vector{LaneMarking}    # detected lane markings
+end
+
+struct MyLocalizationType
     field1::Int
     field2::Float64
 end
@@ -61,10 +76,74 @@ function localize(
     end 
 end
 
+function perspective_projection(point_3d, focal_length)
+    # Simple perspective projection
+    x = focal_length * point_3d[1] / point_3d[3]
+    y = focal_length * point_3d[2] / point_3d[3]
+    return SVector{2, Float64}(x, y)
+end
+
+function pixel_to_world(localization_state, cam_meas, box)
+    # Create camera transformation matrix
+    cam_id = cam_meas.camera_id
+    
+    # Get camera transform
+    T_body_cam = VehicleSim.get_cam_transform(cam_id)
+    T_cam_camrot = VehicleSim.get_rotated_camera_transform()
+    T_body_camrot = VehicleSim.multiply_transforms(T_body_cam, T_cam_camrot)
+    
+    # Get world to body transform
+    R = VehicleSim.Rot_from_quat(localization_state.orientation)
+    T_world_body = [R localization_state.position; 0 0 0 1]
+    
+    # Get world to camera transform
+    T_world_camrot = T_world_body * [T_body_camrot; 0 0 0 1]
+    
+    # Extract bounding box coordinates
+    top, left, bottom, right = box
+    
+    # Convert to metric coordinates in camera frame
+    pixel_len = cam_meas.pixel_length
+    focal_len = cam_meas.focal_length
+    image_width = cam_meas.image_width
+    image_height = cam_meas.image_height
+    
+    # Convert pixel coordinates to camera coordinates
+    cam_left = (left - image_width/2) * pixel_len
+    cam_right = (right - image_width/2) * pixel_len
+    cam_top = (top - image_height/2) * pixel_len
+    cam_bottom = (bottom - image_height/2) * pixel_len
+    
+    # Assume a fixed depth for objects
+    depth = 20.0  
+    
+    # Project to 3D points in camera frame
+    p1 = SVector{3, Float64}(cam_left * depth / focal_len, cam_top * depth / focal_len, depth)
+    p2 = SVector{3, Float64}(cam_right * depth / focal_len, cam_bottom * depth / focal_len, depth)
+    
+    # Center of the bounding box
+    p_center = (p1 + p2) / 2
+    
+    # Convert to world coordinates
+    p_center_homogeneous = T_world_camrot * [p_center; 1]
+    p_world = SVector{3, Float64}(p_center_homogeneous[1:3])
+    
+    # Calculate approximate size
+    width = abs(cam_right - cam_left) * depth / focal_len
+    height = abs(cam_bottom - cam_top) * depth / focal_len
+    
+    # Assume rectangular object
+    size = SVector{3, Float64}(width, height, (width + height) / 2)
+    
+    return p_world, size
+end
+
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel, shutdown_channel)
-    # set up stuff
+    # Obstacle tracking data structure
+    tracked_obstacles = Dict{Int, ObstacleDetection}()
+    next_track_id = 1
+    
     while true
-        
         fetch(shutdown_channel) && break
 
         fresh_cam_meas = []
@@ -72,239 +151,75 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             meas = take!(cam_meas_channel)
             push!(fresh_cam_meas, meas)
         end
-
+        
+        # Skip if no measurements
+        if isempty(fresh_cam_meas)
+            sleep(0.01)
+            continue
+        end
+        
         latest_localization_state = fetch(localization_state_channel)
         
-        # process bounding boxes / run ekf / do what you think is good
-
-        perception_state = MyPerceptionType(0,0.0)
+        # Process camera measurements
+        detected_obstacles = Vector{ObstacleDetection}()
+        
+        for cam_meas in fresh_cam_meas
+            # Process each bounding box
+            for box in cam_meas.bounding_boxes
+                # Convert pixel coordinates to world coordinates
+                position, size = pixel_to_world(latest_localization_state, cam_meas, box)
+                
+                # tracking: assign new ID for now (better tracking would match with previous detections)
+                obstacle = ObstacleDetection(
+                    position,
+                    size,
+                    SVector{2, Float64}(0.0, 0.0),  # Zero velocity for now (would estimate from tracking)
+                    0.8,  # 80% confidence
+                    next_track_id
+                )
+                
+                next_track_id += 1
+                push!(detected_obstacles, obstacle)
+            end
+        end
+        
+        # Create perception state
+        perception_state = MyPerceptionType(
+            fresh_cam_meas[end].time,  # Use latest measurement time
+            detected_obstacles,
+            Vector{LaneMarking}()  # Lane detection not implemented here
+        )
+        
+        # Update perception state channel
         if isready(perception_state_channel)
             take!(perception_state_channel)
         end
         put!(perception_state_channel, perception_state)
-    end
-end
-
-function get_segment_center(map, seg_id)
-    if !haskey(map, seg_id)
-        return SVector(0.0, 0.0)  # Default if segment not found
-    end
-    
-    seg = map[seg_id]
-    # Calculate center point from lane boundaries
-    if length(seg.lane_boundaries) >= 2
-        lb1 = seg.lane_boundaries[1]
-        lb2 = seg.lane_boundaries[end]
-        pt_a = lb1.pt_a
-        pt_b = lb1.pt_b
-        pt_c = lb2.pt_a
-        pt_d = lb2.pt_b
-        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
-    else
-        # Fallback if segment doesn't have enough lane boundaries
-        return SVector(0.0, 0.0)
-    end
-end
-
-function find_nearest_segment(map, position)
-    # Find the nearest road segment to the given position
-    # position is assumed to be a 2D vector (x, y)
-    
-    nearest_segment_id = -1
-    min_distance = Inf
-    
-    for (seg_id, segment) in map
-        # Calculate distances to all lane boundaries in this segment
-        for boundary in segment.lane_boundaries
-            # Calculate distance to line segment between pt_a and pt_b
-            pt_a = boundary.pt_a
-            pt_b = boundary.pt_b
-            
-            # Vector from pt_a to pt_b
-            v_ab = pt_b - pt_a
-            # Vector from pt_a to position
-            v_ap = position - pt_a
-            
-            # Calculate projection of v_ap onto v_ab
-            len_ab_squared = sum(v_ab .^ 2)
-            
-            # Avoid division by zero
-            if len_ab_squared < 1e-10
-                continue
-            end
-            
-            # Calculate projection parameter
-            t = max(0, min(1, sum(v_ap .* v_ab) / len_ab_squared))
-            
-            # Calculate closest point on the line segment
-            closest_point = pt_a + t * v_ab
-            
-            # Calculate distance to the closest point
-            distance = norm(position - closest_point)
-            
-            if distance < min_distance
-                min_distance = distance
-                nearest_segment_id = seg_id
-            end
-        end
-    end
-    
-    return nearest_segment_id
-end
-
-function plan_route(map, current_segment_id, target_segment_id)
-    # Return empty route if we're already at the target
-    if current_segment_id == target_segment_id
-        return [current_segment_id]
-    end
-    
-    # A* search to find an efficient path
-    # Using a combination of path length and estimated distance to target as heuristic
-    function heuristic(seg_id)
-        # Calculate Euclidean distance between current segment and target
-        current_center = get_segment_center(map, seg_id)
-        target_center = get_segment_center(map, target_segment_id)
-        return norm(current_center - target_center)
-    end
-    
-    # Priority queue for A* - using tuple of (priority, segment_id, path)
-    # Priority = g + h where g = path length, h = heuristic estimate to goal
-    
-    # Using a simple Vector and sort it after each insertion
-    # Maybe will switch to a priority queue data structure
-    open_set = [(0.0 + heuristic(current_segment_id), current_segment_id, [current_segment_id])]
-    
-    # Track path costs (g values) and visited nodes
-    g_scores = Dict{Int, Float64}()
-    g_scores[current_segment_id] = 0.0
-    visited = Set{Int}()
-    
-    while !isempty(open_set)
-        # Get node with lowest f_score (priority)
-        sort!(open_set, by = x -> x[1])
-        (_, segment_id, path) = popfirst!(open_set)
         
-        # Skip if already visited (found a better path)
-        if segment_id in visited
-            continue
-        end
-        
-        # Check if we reached the target
-        if segment_id == target_segment_id
-            return path
-        end
-        
-        push!(visited, segment_id)
-        
-        # Check if the segment has children
-        if haskey(map, segment_id)
-            current_g = g_scores[segment_id]
-            
-            for child_id in map[segment_id].children
-                # Calculate edge cost - can be sophisticated based on road properties
-                # Use 1.0 for standard edges for now
-                # and higher costs for special segments like intersections or stop signs
-                edge_cost = 1.0
-                
-                if haskey(map, child_id)
-                    if contains_lane_type(map[child_id], intersection)
-                        edge_cost = 2.0  # Intersections are more costly
-                    elseif contains_lane_type(map[child_id], stop_sign)
-                        edge_cost = 1.5  # Stop signs have medium cost
-                    elseif contains_lane_type(map[child_id], loading_zone)
-                        edge_cost = 0.5  # Prefer loading zones (target type)
-                    end
-                end
-                
-                # New path cost to this child
-                new_g = current_g + edge_cost
-                
-                # Only consider this path if it's better than any previous path to this node
-                if !haskey(g_scores, child_id) || new_g < g_scores[child_id]
-                    g_scores[child_id] = new_g
-                    new_path = vcat(path, [child_id])
-                    f_score = new_g + heuristic(child_id)
-                    push!(open_set, (f_score, child_id, new_path))
-                end
-            end
-        end
+        sleep(0.01)  # Avoid busy waiting
     end
-    
-    # No path found
-    return Int[]
 end
 
 function decision_making(localization_state_channel, 
-    perception_state_channel, 
-    target_segment_channel,
-    shutdown_channel,
-    map, 
-    socket)
-# do some setup
-current_route = Int[]
-current_segment_id = -1  # Will be determined from localization
-target_segment_id = target_road_segment_id
-route_index = 1
+        perception_state_channel, 
+        target_segment_channel,
+        shutdown_channel,
+        map, 
+        socket)
+    # do some setup
+    while true
 
+        fetch(shutdown_channel) && break
 
-# Control parameters
-default_speed = 5.0
-slow_speed = 2.0
-stop_distance = 10.0  # Distance to slow down when approaching target or intersection
+        latest_localization_state = fetch(localization_state_channel)
+        latest_perception_state = fetch(perception_state_channel)
 
-# Tracking the last known GPS position
-last_known_position = SVector(0.0, 0.0)
-vehicle_heading = 0.0
-
-# Helper function to calculate segment center
-function get_segment_center(seg_id)
-    if !haskey(map, seg_id)
-        return SVector(0.0, 0.0)  # Default if segment not found
+        # figure out what to do ... setup motion planning problem etc
+        steering_angle = 0.0
+        target_vel = 0.0
+        cmd = (steering_angle, target_vel, true)
+        serialize(socket, cmd)
     end
-    
-    seg = map[seg_id]
-    # Calculate center point from lane boundaries
-    if length(seg.lane_boundaries) >= 2
-        lb1 = seg.lane_boundaries[1]
-        lb2 = seg.lane_boundaries[end]
-        pt_a = lb1.pt_a
-        pt_b = lb1.pt_b
-        pt_c = lb2.pt_a
-        pt_d = lb2.pt_b
-        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
-    else
-        # Fallback if segment doesn't have enough lane boundaries
-        return SVector(0.0, 0.0)
-    end
-end
-
-# Get direction to target from current position
-function get_direction_to_next_segment(current_id, next_id)
-    current_center = get_segment_center(current_id)
-    next_center = get_segment_center(next_id)
-    
-    # Calculate vector from current to next
-    direction_vector = next_center - current_center
-    
-    # Calculate angle in radians
-    angle = atan(direction_vector[2], direction_vector[1])
-    
-    return angle
-end
-
-while true
-
-    fetch(shutdown_channel) && break
-
-    latest_localization_state = fetch(localization_state_channel)
-    latest_perception_state = fetch(perception_state_channel)
-
-    # figure out what to do ... setup motion planning problem etc
-    steering_angle = 0.0
-    target_vel = 0.0
-    cmd = (steering_angle, target_vel, true)
-    serialize(socket, cmd)
-end
 end
 
 function isfull(ch::Channel)
