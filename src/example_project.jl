@@ -15,21 +15,23 @@ function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.R
     pos = gt_meas.position
     
     #Idea 2 for finding current position
-    current_state = fetch(state_channel)
-    pos = current_state.q[5:6]
+    #current_state = fetch(state_channel)
+    #pos = current_state.q[5:6]
 
     current_segment_id = find_current_segment(pos, map)
 
     println("Current Segment: ", current_segment_id)
     println("Target Segment: ", target_segment_id)
 
-    path = find_shortest_path(target_segment_id, map)
+    path = find_shortest_path(current_segment_id, target_segment_id, map)
+
+    println("Path: ", path)
 
     return path
 end
 
 # Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
-function find_shortest_path(target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
+function find_shortest_path(current_segment_id, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
     queue = [current_segment_id]
     visited = Set{Int}(current_segment_id)
     prev = Dict{Int, Int}()
@@ -231,16 +233,30 @@ end
 
 
 function my_client(host::IPAddr=IPv4(0), port=4444)
+    println("Test")
     socket = Sockets.connect(host, port)
     map_segments = VehicleSim.city_map()
     
     msg = deserialize(socket) # Visualization info
+    serialize(socket, (0.0, 0.0, false))
+    @async while true
+        try
+            serialize(socket, (0.0, 0.0, false))  # steering angle, velocity, emergency_stop
+            println("Sent heartbeat VehicleCommand")
+        catch e
+            @warn "Failed to send VehicleCommand: $e"
+            break
+        end
+        sleep(0.1)
+    end
     @info msg
 
     gps_channel = Channel{GPSMeasurement}(32)
     imu_channel = Channel{IMUMeasurement}(32)
     cam_channel = Channel{CameraMeasurement}(32)
     gt_channel = Channel{GroundTruthMeasurement}(32)
+
+
 
     #localization_state_channel = Channel{MyLocalizationType}(1)
     #perception_state_channel = Channel{MyPerceptionType}(1)
@@ -254,6 +270,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
         sleep(0.001)
         local measurement_msg
         received = false
+        
         while true
             @async eof(socket)
             if bytesavailable(socket) > 0
@@ -263,9 +280,11 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
                 break
             end
         end
+        
         !received && continue
         target_map_segment = measurement_msg.target_segment
         ego_vehicle_id = measurement_msg.vehicle_id
+        
         for meas in measurement_msg.measurements
             if meas isa GPSMeasurement
                 !isfull(gps_channel) && put!(gps_channel, meas)
@@ -277,9 +296,18 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
                 !isfull(gt_channel) && put!(gt_channel, meas)
             end
         end
+        map = VehicleSim.city_map()
+        target_segment_id = target_map_segment.id
+        path = routing(gt_channel, target_segment_id, map)
+        println("ROUTED PATH: ", path)
+    
     end)
 
-    @async localize(gps_channel, imu_channel, localization_state_channel)
-    @async perception(cam_channel, localization_state_channel, perception_state_channel)
-    @async decision_making(localization_state_channel, perception_state_channel, map, socket)
+    #tasks = []
+    
+    #push!(tasks, @async routing(gt_channel, target_map_segment.id, VehicleSim.city_map()))
+
+    #@async localize(gps_channel, imu_channel, localization_state_channel)
+    #@async perception(cam_channel, localization_state_channel, perception_state_channel)
+    #@async decision_making(localization_state_channel, perception_state_channel, map, socket)
 end
