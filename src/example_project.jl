@@ -9,11 +9,15 @@ struct MyPerceptionType
     field2::Float64
 end
 
-function process_gt(
-        gt_channel,
-        shutdown_channel,
-        localization_state_channel,
-        perception_state_channel)
+#Performs routing on current segment found from ground truth position (development only)
+function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
+    #Idea 1 for finding current position
+    gt_meas = fetch(gt_channel)
+    pos = gt_meas.position
+    
+    #Idea 2 for finding current position
+    #current_state = fetch(state_channel)
+    #pos = current_state.q[5:6]
 
     while true
         fetch(shutdown_channel) && break
@@ -24,16 +28,10 @@ function process_gt(
             push!(fresh_gt_meas, meas)
         end
 
-        # process the fresh gt_measurements to produce localization_state and
-        # perception_state
-        
-        take!(localization_state_channel)
-        put!(localization_state_channel, new_localization_state_from_gt)
-        
-        take!(perception_state_channel)
-        put!(perception_state_channel, new_perception_state_from_gt)
-    end
-end
+    path = find_shortest_path(current_segment_id, target_segment_id, map)
+
+    println("Path: ", path)
+  end
 
 function h_imu(x)
     T_body_imu = VehicleSim.get_imu_transform()
@@ -48,10 +46,41 @@ function h_imu(x)
 end
 
 
+# Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
+function find_shortest_path(current_segment_id, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
+    queue = [current_segment_id]
+    visited = Set{Int}(current_segment_id)
+    prev = Dict{Int, Int}()
+    
+    found = false
+    # BFS
+    while !isempty(queue)
+        current = popfirst!(queue)
+        if current == target_segment_id
+            found = true
+            break
+        end
+        for child in map[current].children
+            if child ∉ visited
+                push!(queue, child)
+                push!(visited, child)
+                prev[child] = current
+            end
+        end
+    end
+    
+    # If no path was found, return an empty array.
+    if !found
+        @warn "No path found from segment $current_segment_id to $target_segment_id."
+        return VehicleSim.RoadSegment[]
+    end
+    # Return the path as an array of VehicleSim.RoadSegment objects.
+    return [map[id] for id in path_ids]
+  end
+
 function Jac_h_imu(x)
     # Initialize a 6x13 zero matrix
-    H = zeros(6, 13)
-    
+    H = zeros(6, 13)    
     # Populate the Jacobian with the appropriate derivatives
     H[1, 8] = 1.0  # ∂v_x / ∂x₈
     H[2, 9] = 1.0  # ∂v_y / ∂x₉
@@ -59,9 +88,9 @@ function Jac_h_imu(x)
     H[4, 11] = 1.0 # ∂ω_x / ∂x₁₁
     H[5, 12] = 1.0 # ∂ω_y / ∂x₁₂
     H[6, 13] = 1.0 # ∂ω_z / ∂x₁₃
-    
     return H
 end
+  
 
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
     println("IN localization")
@@ -224,6 +253,29 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         put!(localization_state_channel, localization_state)
     end 
 end
+
+
+## Ellie Chason - start - ##
+
+# Based off reached_target in map.jl
+function find_current_segment(pos, map::Dict{Int, VehicleSim.RoadSegment})
+    for (seg_id, seg) in map
+        A = seg.lane_boundaries[2].pt_a
+        B = seg.lane_boundaries[2].pt_b
+        C = seg.lane_boundaries[3].pt_a
+        D = seg.lane_boundaries[3].pt_b
+        min_x = min(A[1], B[1], C[1], D[1])
+        max_x = max(A[1], B[1], C[1], D[1])
+        min_y = min(A[2], B[2], C[2], D[2])
+        max_y = max(A[2], B[2], C[2], D[2])
+
+        if min_x ≤ pos[1] ≤ max_x && min_y ≤ pos[2] ≤ max_y
+            return seg_id
+        end
+    end
+end
+
+## Ellie Chason - end - ##
 
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel, shutdown_channel)
     # set up stuff
@@ -548,6 +600,17 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     map_segments = VehicleSim.city_map()
     
     msg = deserialize(socket) # Visualization info
+    serialize(socket, (0.0, 0.0, false))
+    @async while true
+        try
+            serialize(socket, (0.0, 0.0, false))  # steering angle, velocity, emergency_stop
+            println("Sent heartbeat VehicleCommand")
+        catch e
+            @warn "Failed to send VehicleCommand: $e"
+            break
+        end
+        sleep(0.1)
+    end
     @info msg
 
     gps_channel = Channel{GPSMeasurement}(32)
@@ -556,8 +619,6 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     gt_channel = Channel{GroundTruthMeasurement}(32)
 
     localization_state_channel = Channel{MyLocalizationType}(1)
-
-    target_segment_channel = Channel{Int}(1)
     #perception_state_channel = Channel{MyPerceptionType}(1)
 
     shutdown_channel = Channel{Bool}(1)
@@ -574,6 +635,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
         sleep(0.001)
         local measurement_msg
         received = false
+        
         while true
             @async eof(socket)
             if bytesavailable(socket) > 0
@@ -583,6 +645,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                 break
             end
         end
+        
         !received && continue
         target_map_segment = measurement_msg.target_segment
         old_target_segment = fetch(target_segment_channel)
@@ -591,6 +654,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
             put!(target_segment_channel, target_map_segment)
         end
         ego_vehicle_id = measurement_msg.vehicle_id
+        
         for meas in measurement_msg.measurements
             if meas isa GPSMeasurement
                 !isfull(gps_channel) && put!(gps_channel, meas)
@@ -602,7 +666,13 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                 !isfull(gt_channel) && put!(gt_channel, meas)
             end
         end
+        map = VehicleSim.city_map()
+        target_segment_id = target_map_segment.id
+        path = routing(gt_channel, target_segment_id, map)
+        println("ROUTED PATH: ", path)
+    
     end)
+
 
     if use_gt
         @async process_gt(gt_channel,
