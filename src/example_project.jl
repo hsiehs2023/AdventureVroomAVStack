@@ -32,6 +32,7 @@ function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.R
 
     println("Path: ", path)
   end
+end
 
 function h_imu(x)
     T_body_imu = VehicleSim.get_imu_transform()
@@ -93,20 +94,15 @@ end
   
 
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    println("IN localization")
     # Set up algorithm / initialize variables
     # process measurements
-    #TODO change these values to reflect appropriate uncertainties for each type of measurement
     proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
     gt_states = [zeros(13),] # ground truth states that we will try to estimate
     timesteps = []
     last_timestamp = time()
 
-    #TODO change these values to reflect appropriate uncertainties for each type of measurement
     meas_cov = Diagonal([0.2, 0.1, 0.1, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
-    #meas_cov_imu = Diagonal([0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
 
-    #what should this matrix be???
     #sqrt of these values *2, our mean should be within +/- these values with 95% confidence
     Σs = Matrix{Float64}[Diagonal([25,25,25,0.01,0.01,0.01,0.01,1,1,1,0.01,0.01,0.01]),]
 
@@ -114,13 +110,8 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     zs = Vector{Float64}[]
 
     while true
-    # for k = 1:10
         isready(shutdown_channel) && break
         fresh_gps_meas = []
-        #println("Channel size: ", length(gps_channel))
-        #println("taking a meas")
-        # meas = take!(gps_channel)
-        # println(meas)
         while !isready(gps_channel)
             sleep(0.001)
         end
@@ -156,18 +147,13 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         Δ = current_timestamp - last_timestamp
         last_timestamp = current_timestamp
 
-        #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
-        #TODO add in these measurements into μs (velocities can remain 0)
         alpha = fresh_gps_meas[end].heading
-        # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
         μs = [[fresh_gps_meas[end].lat, fresh_gps_meas[end].long, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
         linear_velocity = fresh_imu_meas[end].linear_vel
         angular_velocity = fresh_imu_meas[end].angular_vel
-        #Δ = 0.1
         position = [fresh_gps_meas[end].lat, fresh_gps_meas[end].long, 1.0]
         q = [cos(alpha/2), 0, 0, sin(alpha/2)]
 
-        # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
         xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
         x_prev = xₖ
         zₖ_gps = VehicleSim.h_gps(xₖ)
@@ -200,40 +186,16 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         d_imu = h_imu(μ_hat)
         d = vcat(d_gps, d_imu) - C*μ_hat
 
-        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
         Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
         μ = Σ*(inv(Σ_hat) *μ_hat + C'*(inv(meas_cov))*(zₖ - d))
         push!(μs, μ)
         push!(Σs, Σ)
         push!(zs, zₖ)
 
-        #zₖ = h_imu(xₖ)
-        #C_imu = Jac_h_imu(μ_hat)
-        #d_imu = h_imu(μ_hat) - C_imu*μ_hat
-
-        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
-        # Σ = inv(inv(Σ_hat) + C_imu' * inv(meas_cov_imu) * C_imu)
-        # μ = Σ*(inv(Σ_hat) *μ_hat + C_imu'*(inv(meas_cov_imu))*(zₖ - d_imu))
-        # push!(μs, μ)
-        # push!(Σs, Σ)
-        # push!(zs, zₖ)
-
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
 
         if true
-            # println("Timestep ", k, ":")
-            # #println("   Ground truth (x,y): ", xₖ[1:2])
-            # println("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
-            # println("   Estimated (x,y): ", μ[1:3])
-            # #println("   Ground truth v: ", xₖ[3])
-            # println("   estimated q: ", μ[4:7])
-            # #println("   Ground truth θ: ", xₖ[4])
-            # println("   estimated linear: ", μ[8:10])
-            # println("   estimated angular: ", μ[11:13])
-            # println("   measurement received: ", zₖ)
-            # println("   Uncertainty measure (det(cov)): ", det(Σ))
-
             println("Hello")
             println("   Ground truth (x,y): ", fresh_gt_meas[end].position)
             println("   estimated: ", μ[1:3])
@@ -301,154 +263,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     end
 end
 
-function get_segment_center(map, seg_id)
-    if !haskey(map, seg_id)
-        return SVector(0.0, 0.0)  # Default if segment not found
-    end
-    
-    seg = map[seg_id]
-    # Calculate center point from lane boundaries
-    if length(seg.lane_boundaries) >= 2
-        lb1 = seg.lane_boundaries[1]
-        lb2 = seg.lane_boundaries[end]
-        pt_a = lb1.pt_a
-        pt_b = lb1.pt_b
-        pt_c = lb2.pt_a
-        pt_d = lb2.pt_b
-        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
-    else
-        # Fallback if segment doesn't have enough lane boundaries
-        return SVector(0.0, 0.0)
-    end
-end
 
-function find_nearest_segment(map, position)
-    # Find the nearest road segment to the given position
-    # position is assumed to be a 2D vector (x, y)
-    
-    nearest_segment_id = -1
-    min_distance = Inf
-    
-    for (seg_id, segment) in map
-        # Calculate distances to all lane boundaries in this segment
-        for boundary in segment.lane_boundaries
-            # Calculate distance to line segment between pt_a and pt_b
-            pt_a = boundary.pt_a
-            pt_b = boundary.pt_b
-            
-            # Vector from pt_a to pt_b
-            v_ab = pt_b - pt_a
-            # Vector from pt_a to position
-            v_ap = position - pt_a
-            
-            # Calculate projection of v_ap onto v_ab
-            len_ab_squared = sum(v_ab .^ 2)
-            
-            # Avoid division by zero
-            if len_ab_squared < 1e-10
-                continue
-            end
-            
-            # Calculate projection parameter
-            t = max(0, min(1, sum(v_ap .* v_ab) / len_ab_squared))
-            
-            # Calculate closest point on the line segment
-            closest_point = pt_a + t * v_ab
-            
-            # Calculate distance to the closest point
-            distance = norm(position - closest_point)
-            
-            if distance < min_distance
-                min_distance = distance
-                nearest_segment_id = seg_id
-            end
-        end
-    end
-    
-    return nearest_segment_id
-end
-
-function plan_route(map, current_segment_id, target_segment_id)
-    # Return empty route if we're already at the target
-    if current_segment_id == target_segment_id
-        return [current_segment_id]
-    end
-    
-    # A* search to find an efficient path
-    # Using a combination of path length and estimated distance to target as heuristic
-    function heuristic(seg_id)
-        # Calculate Euclidean distance between current segment and target
-        current_center = get_segment_center(map, seg_id)
-        target_center = get_segment_center(map, target_segment_id)
-        return norm(current_center - target_center)
-    end
-    
-    # Priority queue for A* - using tuple of (priority, segment_id, path)
-    # Priority = g + h where g = path length, h = heuristic estimate to goal
-    
-    # Using a simple Vector and sort it after each insertion
-    # Maybe will switch to a priority queue data structure
-    open_set = [(0.0 + heuristic(current_segment_id), current_segment_id, [current_segment_id])]
-    
-    # Track path costs (g values) and visited nodes
-    g_scores = Dict{Int, Float64}()
-    g_scores[current_segment_id] = 0.0
-    visited = Set{Int}()
-    
-    while !isempty(open_set)
-        # Get node with lowest f_score (priority)
-        sort!(open_set, by = x -> x[1])
-        (_, segment_id, path) = popfirst!(open_set)
-        
-        # Skip if already visited (found a better path)
-        if segment_id in visited
-            continue
-        end
-        
-        # Check if we reached the target
-        if segment_id == target_segment_id
-            return path
-        end
-        
-        push!(visited, segment_id)
-        
-        # Check if the segment has children
-        if haskey(map, segment_id)
-            current_g = g_scores[segment_id]
-            
-            for child_id in map[segment_id].children
-                # Calculate edge cost - can be sophisticated based on road properties
-                # Use 1.0 for standard edges for now
-                # and higher costs for special segments like intersections or stop signs
-                edge_cost = 1.0
-                
-                if haskey(map, child_id)
-                    if contains_lane_type(map[child_id], intersection)
-                        edge_cost = 2.0  # Intersections are more costly
-                    elseif contains_lane_type(map[child_id], stop_sign)
-                        edge_cost = 1.5  # Stop signs have medium cost
-                    elseif contains_lane_type(map[child_id], loading_zone)
-                        edge_cost = 0.5  # Prefer loading zones (target type)
-                    end
-                end
-                
-                # New path cost to this child
-                new_g = current_g + edge_cost
-                
-                # Only consider this path if it's better than any previous path to this node
-                if !haskey(g_scores, child_id) || new_g < g_scores[child_id]
-                    g_scores[child_id] = new_g
-                    new_path = vcat(path, [child_id])
-                    f_score = new_g + heuristic(child_id)
-                    push!(open_set, (f_score, child_id, new_path))
-                end
-            end
-        end
-    end
-    
-    # No path found
-    return Int[]
-end
 
 function decision_making(localization_state_channel, 
     perception_state_channel, 
@@ -456,137 +271,87 @@ function decision_making(localization_state_channel,
     shutdown_channel,
     map, 
     socket)
-# do some setup
-current_route = Int[]
-current_segment_id = -1  # Will be determined from localization
-target_segment_id = target_road_segment_id
-route_index = 1
+    # do some setup
 
-
-# Control parameters
-default_speed = 5.0
-slow_speed = 2.0
-stop_distance = 10.0  # Distance to slow down when approaching target or intersection
-
-# Tracking the last known GPS position
-last_known_position = SVector(0.0, 0.0)
-vehicle_heading = 0.0
-
-# Helper function to calculate segment center
-function get_segment_center(seg_id)
-    if !haskey(map, seg_id)
-        return SVector(0.0, 0.0)  # Default if segment not found
+    # --- begin motion planning ---
+    # function to compute midpoints for a one lane road segment
+    function compute_midpoints(segment)
+        a1 = segment.lane_boundaries[1].pt_a
+        b1 = segment.lane_boundaries[1].pt_b
+        a2 = segment.lane_boundaries[2].pt_a
+        b2 = segment.lane_boundaries[2].pt_b
+        a_mid = (a1 + a2)/2
+        b_mid = (b1 + b2)/2
+        [a_mid, b_mid] #2X2 matrix
     end
-    
-    seg = map[seg_id]
-    # Calculate center point from lane boundaries
-    if length(seg.lane_boundaries) >= 2
-        lb1 = seg.lane_boundaries[1]
-        lb2 = seg.lane_boundaries[end]
-        pt_a = lb1.pt_a
-        pt_b = lb1.pt_b
-        pt_c = lb2.pt_a
-        pt_d = lb2.pt_b
-        return 0.25 * (pt_a + pt_b + pt_c + pt_d)
-    else
-        # Fallback if segment doesn't have enough lane boundaries
-        return SVector(0.0, 0.0)
+    #given a list of segments
+    path = [] #this will be the list of segments returned by routing function
+    polyline = [] #polyline we create
+    for id in path
+        pt = compute_midpoints(map[id])
+        push!(polyline, pt)
     end
-end
+    #now we can do PID controller on polyline
+    alpha = [0.0, 0.0]
+    current_segment_index = 1
 
-# Get direction to target from current position
-function get_direction_to_next_segment(current_id, next_id)
-    current_center = get_segment_center(current_id)
-    next_center = get_segment_center(next_id)
-    
-    # Calculate vector from current to next
-    direction_vector = next_center - current_center
-    
-    # Calculate angle in radians
-    angle = atan(direction_vector[2], direction_vector[1])
-    
-    return angle
-end
+    while true
 
-# --- begin motion planning ---
-# function to compute midpoints for a one lane road segment
-function compute_midpoints(segment)
-    a1 = segment.lane_boundaries[1].pt_a
-    b1 = segment.lane_boundaries[1].pt_b
-    a2 = segment.lane_boundaries[2].pt_a
-    b2 = segment.lane_boundaries[2].pt_b
-    a_mid = (a1 + a2)/2
-    b_mid = (b1 + b2)/2
-    [a_mid, b_mid] #2X2 matrix
-end
-#given a list of segments
-path = [] #this will be the list of segments returned by routing function
-polyline = [] #polyline we create
-for id in path
-    pt = compute_midpoints(map[id])
-    push!(polyline, pt)
-end
-#now we can do PID controller on polyline
-alpha = [0.0, 0.0]
-current_segment_index = 1
+        fetch(shutdown_channel) && break
 
-while true
+        latest_localization_state = fetch(localization_state_channel)
+        latest_perception_state = fetch(perception_state_channel)
+        c1 = latest_localization_state[1]
+        c2 = latest_localization_state[2]
+        θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state[4:7])
+        v = norm(latest_localization_state[8:9])
 
-    fetch(shutdown_channel) && break
+        lookahead_radius = v * ls
+        current_segment = polyline[current_segment_index]
+        p1 = current_segment[1]
+        p2 = current_segment[2]
+        a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
+        b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
+        c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
-    latest_localization_state = fetch(localization_state_channel)
-    latest_perception_state = fetch(perception_state_channel)
-    c1 = latest_localization_state[1]
-    c2 = latest_localization_state[2]
-    θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state[4:7])
-    v = norm(latest_localization_state[8:9])
+        discriminant = b^2 - 4 * a * c
 
-    lookahead_radius = v * ls
-    current_segment = polyline[current_segment_index]
-    p1 = current_segment[1]
-    p2 = current_segment[2]
-    a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
-    b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
-    c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
+        if discriminant >= 0
+            sqrt_disc = sqrt(discriminant)
+            t_upper = (-b + sqrt_disc) / (2 * a)
+            t_lower = (-b - sqrt_disc) / (2 * a)
+            valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
+            t = isempty(valid_t) ? -1 : first(valid_t)
+        end
 
-    discriminant = b^2 - 4 * a * c
+        center = SVector(c1, c2)
+        q = SVector((t * (current_segment.p2 - current_segment.p1) + current_segment.p1)) - center
 
-    if discriminant >= 0
-        sqrt_disc = sqrt(discriminant)
-        t_upper = (-b + sqrt_disc) / (2 * a)
-        t_lower = (-b - sqrt_disc) / (2 * a)
-        valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
-        t = isempty(valid_t) ? -1 : first(valid_t)
+        heading = [cos(θ); sin(θ)]
+        dot_value = dot(q, heading) / (norm(q) * norm(heading))
+        alpha = acos(clamp(dot_value, -1, 1))  # Angle magnitude
+
+        # Use cross product to determine sign
+        cross_value = heading[1] * q[2] - heading[2] * q[1]  # 2D cross product determinant
+        alpha *= sign(cross_value)
+
+        turn = atan((2 * L * sin(alpha)) / lookahead_radius)
+        result = [turn, 1.0]
+        if v > 6
+            result = [turn, -1.0]
+        end
+
+        # Format into cmd object and send cmd through socket
+        cmd = (steering_angle, target_velocity, true)
+        take!(control_ch)
+        put!(control_ch, result)
+
+        # figure out what to do ... setup motion planning problem etc
+        steering_angle = 0.0
+        target_vel = 0.0
+        cmd = (steering_angle, target_vel, true)
+        serialize(socket, cmd)
     end
-
-    center = SVector(c1, c2)
-    q = SVector((t * (current_segment.p2 - current_segment.p1) + current_segment.p1)) - center
-
-    heading = [cos(θ); sin(θ)]
-    dot_value = dot(q, heading) / (norm(q) * norm(heading))
-    alpha = acos(clamp(dot_value, -1, 1))  # Angle magnitude
-
-    # Use cross product to determine sign
-    cross_value = heading[1] * q[2] - heading[2] * q[1]  # 2D cross product determinant
-    alpha *= sign(cross_value)
-
-    turn = atan((2 * L * sin(alpha)) / lookahead_radius)
-    result = [turn, 1.0]
-    if v > 6
-        result = [turn, -1.0]
-    end
-
-    # Format into cmd object and send cmd through socket
-    cmd = (steering_angle, target_velocity, true)
-    take!(control_ch)
-    put!(control_ch, result)
-
-    # figure out what to do ... setup motion planning problem etc
-    steering_angle = 0.0
-    target_vel = 0.0
-    cmd = (steering_angle, target_vel, true)
-    serialize(socket, cmd)
-end
 
 end
 
@@ -698,7 +463,6 @@ function shutdown_listener(shutdown_channel, tasks)
         "***************
       CLIENT COMMANDS
       ***************
-            -Make sure focus is on this terminal window. Then:
             -Press 'q' to shutdown threads. 
     "
     @info info_string
@@ -709,9 +473,10 @@ function shutdown_listener(shutdown_channel, tasks)
         if key == 'q'
             # terminate threads
             println("Terminating threads")
-            put!(shutdown_channel, true)     
+            put!(shutdown_channel, true)
+
+            
             return
         end
     end
-end
 end
