@@ -537,7 +537,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                       shutdown_channel,
                       localization_state_channel,
                       perception_state_channel)
-
+    end
     tasks = []
     # push!(tasks, error_mon)
     push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
