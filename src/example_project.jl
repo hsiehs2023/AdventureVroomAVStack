@@ -199,7 +199,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
 
-        if true
+        if false
             println("Hello")
             println("   Ground truth (x,y): ", fresh_gt_meas[end].position)
             println("   estimated: ", μ[1:3])
@@ -276,7 +276,7 @@ function decision_making(localization_state_channel,
     map, 
     socket)
     # do some setup
-
+    println("In decision")
     # --- begin motion planning ---
     # function to compute midpoints for a one lane road segment
     function compute_midpoints(segment)
@@ -298,6 +298,7 @@ function decision_making(localization_state_channel,
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
     current_segment_index = 1
+    println("in decision")
 
     while true
 
@@ -345,13 +346,9 @@ function decision_making(localization_state_channel,
             result = [turn, -1.0]
         end
 
-        # Format into cmd object and send cmd through socket
-        cmd = (steering_angle, target_velocity, true)
-        take!(control_ch)
-        put!(control_ch, result)
-
         # figure out what to do ... setup motion planning problem etc
-        steering_angle = 0.0
+        steering_angle = turn
+        # if path[current_segment_index].lane_types == stop_sign
         target_vel = 0.0
         cmd = (steering_angle, target_vel, true)
         serialize(socket, cmd)
@@ -378,7 +375,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     target_segment_channel = Channel{Int}(1)
 
     localization_state_channel = Channel{MyLocalizationType}(1)
-    #perception_state_channel = Channel{MyPerceptionType}(1)
+    perception_state_channel = Channel{MyPerceptionType}(1)
 
     shutdown_channel = Channel{Bool}(1)
     put!(shutdown_channel, false)
@@ -389,6 +386,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     error_mon = errormonitor(@async while true
         # This while loop reads to the end of the socket stream (makes sure you
         # are looking at the latest messages)
+        fetch(shutdown_channel) && break
         sleep(0.001)
         local measurement_msg
         received = false
@@ -418,10 +416,10 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     end)
 
     tasks = []
-    # push!(tasks, error_mon)
+    push!(tasks, error_mon)
     push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
-    # push!(@async perception(cam_channel, localization_state_channel, perception_state_channel))
-    # push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, map, socket))
+    push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
+    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map, socket))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
 
     for t in tasks
