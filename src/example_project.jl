@@ -94,7 +94,6 @@ end
   
 
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    println("In localization")
     # Set up algorithm / initialize variables
     # process measurements
     proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
@@ -111,42 +110,41 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     zs = Vector{Float64}[]
 
     while true
-        isready(shutdown_channel) && break
+        fetch(shutdown_channel) && break
         
         fresh_gps_meas = []
         while !isready(gps_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             sleep(0.001)
         end
         
         while isready(gps_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
 
         fresh_imu_meas = []
         while !isready(imu_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             sleep(0.001)
         end
         while isready(imu_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
 
         fresh_gt_meas = []
         while !isready(gt_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             sleep(0.001)
         end
         while isready(gt_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             meas = take!(gt_channel)
             push!(fresh_gt_meas, meas)
         end
-
 
         # Dynamically calculate the time step Δ
         current_timestamp = time()
@@ -200,7 +198,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
-        println("hello2")
 
         if true
             println("Hello")
@@ -378,11 +375,13 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     imu_channel = Channel{IMUMeasurement}(32)
     cam_channel = Channel{CameraMeasurement}(32)
     gt_channel = Channel{GroundTruthMeasurement}(32)
+    target_segment_channel = Channel{Int}(1)
 
     localization_state_channel = Channel{MyLocalizationType}(1)
     #perception_state_channel = Channel{MyPerceptionType}(1)
 
     shutdown_channel = Channel{Bool}(1)
+    put!(shutdown_channel, false)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
@@ -444,11 +443,9 @@ function shutdown_listener(shutdown_channel, tasks)
 
         if key == 'q'
             # terminate threads
-            # println("taking")
-            # take!(shutdown_channel)
+            take!(shutdown_channel)
             println("Terminating threads")
             put!(shutdown_channel, true)
-            println("put shutdown")
             return
         end
     end
