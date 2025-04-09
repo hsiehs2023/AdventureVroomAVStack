@@ -326,12 +326,18 @@ function decision_making(localization_state_channel,
     current_segment_index = 1
     println("in decision")
 
-    while true
 
+    # --- State tracking for stop sign ---
+    at_stop_sign = false
+    stop_timer_started = false
+    stop_start_time = 0.0
+    required_stop_time = 3.0  # seconds to wait at stop sign
+    while true
+        println("in while loop")
         fetch(shutdown_channel) && break
         
         latest_localization_state = fetch(localization_state_channel)
-        latest_perception_state = fetch(perception_state_channel)
+        #latest_perception_state = fetch(perception_state_channel)
         c1 = latest_localization_state[1]
         c2 = latest_localization_state[2]
         θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state[4:7])
@@ -381,9 +387,43 @@ function decision_making(localization_state_channel,
 
         # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
         # we can change this to include OR if perception takes in another vehicle in line of sight
-        if path[current_segment_index].lane_types == stop_sign
-            #do a more sophisticated for loop here to decrease the velocity incrementally throughout the segment
-            cmd = (steering_angle,[0, 0, 0], true)
+            
+        current_time = time()
+        lane_type = path[current_segment_index].lane_types
+
+        if lane_type == stop_sign
+            if !at_stop_sign && t > 0.7
+                decel_factor = clamp(1.0 - (t - 0.7) / 0.3, 0.0, 1.0)
+                target_speed = 3.0 * decel_factor
+                cmd = (steering_angle, [target_speed, 0, 0], true)
+
+                if target_speed < 0.2
+                    at_stop_sign = true
+                    stop_start_time = current_time
+                end
+
+            elseif at_stop_sign
+                if !stop_timer_started
+                    stop_timer_started = true
+                    stop_start_time = current_time
+                end
+
+                elapsed = current_time - stop_start_time
+
+                if elapsed < required_stop_time
+                    cmd = (0.0, [0.0, 0.0, 0.0], true)
+                else
+                    cmd = (steering_angle, [3.0, 0, 0], true)
+                    at_stop_sign = false
+                    stop_timer_started = false
+                end
+            else
+                cmd = (steering_angle, [v, 0, 0], true)
+            end
+        else
+            # Regular driving
+            speed = v > 6 ? -1.0 : 1.0
+            cmd = (steering_angle, [3.0 * speed, 0, 0], true)
         end
 
         if current_segment_index == 1 && t <= 0.1
@@ -459,7 +499,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     tasks = []
     push!(tasks, error_mon)
     push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
-    push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
+    #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
     push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map, socket))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
 
