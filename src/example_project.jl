@@ -366,6 +366,12 @@ function decision_making(localization_state_channel,
         target_vel = [3.0, 0, 0]
         cmd = (steering_angle, target_vel, true)
 
+        if current_segment_index == 1 && t <= 0.1
+            current_segment_index += 1
+        elseif 0.9 ≤ t ≤ 1.1 && current_segment_index < length(path.segments)
+            current_segment_index += 1
+        end
+
         # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
         # we can change this to include OR if perception takes in another vehicle in line of sight
         if path[current_segment_index].lane_types == stop_sign
