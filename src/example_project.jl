@@ -290,6 +290,16 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
+    function compute_midpoint_target(segment)
+        a1 = segment.lane_boundaries[length(lane_boundaries)-1].pt_a
+        b1 = segment.lane_boundaries[length(lane_boundaries)-1].pt_b
+        a2 = segment.lane_boundaries[end].pt_a
+        b2 = segment.lane_boundaries[end].pt_b
+        a_mid = (a1 + a2)/2
+        b_mid = (b1 + b2)/2
+        [a_mid, b_mid] #2X2 matrix
+    end
+
 
     target_segment = 0
     while !isready(target_segment_channel)
@@ -304,10 +314,13 @@ function decision_making(localization_state_channel,
 
     path = routing(gt_channel, target_segment, map) #this will be the list of segments returned by routing function
     polyline = [] #polyline we create
-    for seg in path
-        pt = compute_midpoints(seg)
+    for i in 1:length(path)-1
+        pt = compute_midpoints(path[i])
         push!(polyline, pt)
     end
+    pt = compute_midpoint_target(path[end])
+    push!(polyline, pt)
+
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
     current_segment_index = 1
@@ -366,16 +379,17 @@ function decision_making(localization_state_channel,
         target_vel = [3.0, 0, 0]
         cmd = (steering_angle, target_vel, true)
 
+        # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
+        # we can change this to include OR if perception takes in another vehicle in line of sight
+        if path[current_segment_index].lane_types == stop_sign
+            #do a more sophisticated for loop here to decrease the velocity incrementally throughout the segment
+            cmd = (steering_angle,[0, 0, 0], true)
+        end
+
         if current_segment_index == 1 && t <= 0.1
             current_segment_index += 1
         elseif 0.9 ≤ t ≤ 1.1 && current_segment_index < length(path.segments)
             current_segment_index += 1
-        end
-
-        # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
-        # we can change this to include OR if perception takes in another vehicle in line of sight
-        if path[current_segment_index].lane_types == stop_sign
-            cmd = (steering_angle,[0, 0, 0], true)
         end
 
         serialize(socket, cmd)
