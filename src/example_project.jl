@@ -1,7 +1,8 @@
 struct MyLocalizationType
     # TODO: add timestamp and perhaps orientation
-    field1::Int
-    field2::Float64
+    position::SVector{3, Float64}
+    orientation::SVector{4, Float64}
+    velocity::SVector{3, Float64}
 end
 
 struct MyPerceptionType
@@ -10,7 +11,7 @@ struct MyPerceptionType
 end
 
 #Performs routing on current segment found from ground truth position (development only)
-function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
+function routing(gt_channel, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment})
     #Idea 1 for finding current position
     gt_meas = fetch(gt_channel)
     pos = gt_meas.position
@@ -19,20 +20,16 @@ function routing(gt_channel, target_segment_id::Int, map::Dict{Int, VehicleSim.R
     #current_state = fetch(state_channel)
     #pos = current_state.q[5:6]
 
-    while true
-        fetch(shutdown_channel) && break
+    current_segment_id = find_current_segment(pos, map)
 
-        fresh_gt_meas = []
-        while isready(gt_channel)
-            meas = take!(gt_channel)
-            push!(fresh_gt_meas, meas)
-        end
+    #println("Current Segment: ", current_segment_id)
+    #println("Target Segment: ", target_segment_id)
 
     path = find_shortest_path(current_segment_id, target_segment_id, map)
-    path
 
-    println("Path: ", path)
-  end
+    #println("Path: ", path)
+
+    return path
 end
 
 function h_imu(x)
@@ -49,7 +46,7 @@ end
 
 
 # Finds shortest path to target using BFS. For development, current state of ground truth is used for vehicle position
-function find_shortest_path(current_segment_id, target_segment_id::Int, map::Dict{Int, VehicleSim.RoadSegment})
+function find_shortest_path(current_segment_id, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment})
     queue = [current_segment_id]
     visited = Set{Int}(current_segment_id)
     prev = Dict{Int, Int}()
@@ -76,6 +73,16 @@ function find_shortest_path(current_segment_id, target_segment_id::Int, map::Dic
         @warn "No path found from segment $current_segment_id to $target_segment_id."
         return VehicleSim.RoadSegment[]
     end
+    # Reconstruct the path
+    path_ids = Int[]
+    seg_id = target_segment_id
+    while seg_id != current_segment_id
+        push!(path_ids, seg_id)
+        seg_id = prev[seg_id]
+    end
+    push!(path_ids, current_segment_id)
+    reverse!(path_ids)
+
     # Return the path as an array of VehicleSim.RoadSegment objects.
     return [map[id] for id in path_ids]
   end
@@ -112,7 +119,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
     while true
         fetch(shutdown_channel) && break
-        
         fresh_gps_meas = []
         while !isready(gps_channel)
             fetch(shutdown_channel) && break
@@ -213,7 +219,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
 
 
-        localization_state = MyLocalizationType(0,0.0)
+        localization_state = MyLocalizationType(μ[1:3], μ[4:7], μ[8:10])
         if isready(localization_state_channel)
             take!(localization_state_channel)
         end
@@ -227,10 +233,10 @@ end
 # Based off reached_target in map.jl
 function find_current_segment(pos, map::Dict{Int, VehicleSim.RoadSegment})
     for (seg_id, seg) in map
-        A = seg.lane_boundaries[2].pt_a
-        B = seg.lane_boundaries[2].pt_b
-        C = seg.lane_boundaries[3].pt_a
-        D = seg.lane_boundaries[3].pt_b
+        A = seg.lane_boundaries[1].pt_a
+        B = seg.lane_boundaries[1].pt_b
+        C = seg.lane_boundaries[2].pt_a
+        D = seg.lane_boundaries[2].pt_b
         min_x = min(A[1], B[1], C[1], D[1])
         max_x = max(A[1], B[1], C[1], D[1])
         min_y = min(A[2], B[2], C[2], D[2])
@@ -275,7 +281,7 @@ function decision_making(localization_state_channel,
     target_segment_channel,
     shutdown_channel,
     map, 
-    socket)
+    socket, gt_channel)
     # do some setup
     println("In decision")
     # --- begin motion planning ---
@@ -291,8 +297,8 @@ function decision_making(localization_state_channel,
     end
 
     function compute_midpoint_target(segment)
-        a1 = segment.lane_boundaries[length(lane_boundaries)-1].pt_a
-        b1 = segment.lane_boundaries[length(lane_boundaries)-1].pt_b
+        a1 = segment.lane_boundaries[length(segment.lane_boundaries)-1].pt_a
+        b1 = segment.lane_boundaries[length(segment.lane_boundaries)-1].pt_b
         a2 = segment.lane_boundaries[end].pt_a
         b2 = segment.lane_boundaries[end].pt_b
         a_mid = (a1 + a2)/2
@@ -300,17 +306,17 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
-
-    target_segment = 0
-    while !isready(target_segment_channel)
-        fetch(shutdown_channel) && break
-        sleep(0.001)
-    end
-    while isready(target_segment_channel)
-        fetch(shutdown_channel) && break
-        meas = take!(target_segment_channel)
-        target_segment = meas
-    end
+    target_segment = 80
+    # while !isready(target_segment_channel)
+    #     fetch(shutdown_channel) && break
+    #     sleep(0.001)
+    # end
+    # while isready(target_segment_channel)
+    #     fetch(shutdown_channel) && break
+    #     meas = take!(target_segment_channel)
+    #     target_segment = meas
+    # end
+    println(target_segment)
 
     path = routing(gt_channel, target_segment, map) #this will be the list of segments returned by routing function
     polyline = [] #polyline we create
@@ -320,11 +326,11 @@ function decision_making(localization_state_channel,
     end
     pt = compute_midpoint_target(path[end])
     push!(polyline, pt)
+    println(polyline)
 
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
     current_segment_index = 1
-    println("in decision")
 
 
     # --- State tracking for stop sign ---
@@ -333,15 +339,16 @@ function decision_making(localization_state_channel,
     stop_start_time = 0.0
     required_stop_time = 3.0  # seconds to wait at stop sign
     while true
-        println("in while loop")
         fetch(shutdown_channel) && break
         
         latest_localization_state = fetch(localization_state_channel)
         #latest_perception_state = fetch(perception_state_channel)
-        c1 = latest_localization_state[1]
-        c2 = latest_localization_state[2]
-        θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state[4:7])
-        v = norm(latest_localization_state[8:9])
+        c1 = latest_localization_state.position[1]
+        c2 = latest_localization_state.position[2]
+        θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state.orientation)
+        v = norm(latest_localization_state.velocity)
+        ls = 0.1 #lookahead time
+        L=13
 
         lookahead_radius = v * ls
         current_segment = polyline[current_segment_index]
@@ -360,10 +367,11 @@ function decision_making(localization_state_channel,
             t_lower = (-b - sqrt_disc) / (2 * a)
             valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
             t = isempty(valid_t) ? -1 : first(valid_t)
+        else t = -1.0 #HELPPPPPPP
         end
 
         center = SVector(c1, c2)
-        q = SVector((t * (current_segment.p2 - current_segment.p1) + current_segment.p1)) - center
+        q = SVector((t * (p2 - p1) + p1)) - center
 
         heading = [cos(θ); sin(θ)]
         dot_value = dot(q, heading) / (norm(q) * norm(heading))
@@ -374,6 +382,7 @@ function decision_making(localization_state_channel,
         alpha *= sign(cross_value)
 
         turn = atan((2 * L * sin(alpha)) / lookahead_radius)
+        #println("here")
         result = [turn, 1.0]
         if v > 6
             result = [turn, -1.0]
@@ -382,49 +391,52 @@ function decision_making(localization_state_channel,
         # figure out what to do ... setup motion planning problem etc
         steering_angle = turn
         # if path[current_segment_index].lane_types == stop_sign
-        target_vel = [3.0, 0, 0]
+        target_vel = 3
         cmd = (steering_angle, target_vel, true)
 
         # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
         # we can change this to include OR if perception takes in another vehicle in line of sight
             
-        current_time = time()
-        lane_type = path[current_segment_index].lane_types
+        # current_time = time()
+        # lane_type = path[current_segment_index].lane_types
 
-        if lane_type == stop_sign
-            if !at_stop_sign && t > 0.7
-                decel_factor = clamp(1.0 - (t - 0.7) / 0.3, 0.0, 1.0)
-                target_speed = 3.0 * decel_factor
-                cmd = (steering_angle, [target_speed, 0, 0], true)
+        # if lane_type == stop_sign
+        #     if !at_stop_sign && t > 0.7
+        #         decel_factor = clamp(1.0 - (t - 0.7) / 0.3, 0.0, 1.0)
+        #         target_speed = 3.0 * decel_factor
+        #         cmd = (steering_angle, [target_speed, 0, 0], true)
 
-                if target_speed < 0.2
-                    at_stop_sign = true
-                    stop_start_time = current_time
-                end
+        #         if target_speed < 0.2
+        #             at_stop_sign = true
+        #             stop_start_time = current_time
+        #         end
 
-            elseif at_stop_sign
-                if !stop_timer_started
-                    stop_timer_started = true
-                    stop_start_time = current_time
-                end
+        #     elseif at_stop_sign
+        #         if !stop_timer_started
+        #             stop_timer_started = true
+        #             stop_start_time = current_time
+        #         end
 
-                elapsed = current_time - stop_start_time
+        #         elapsed = current_time - stop_start_time
 
-                if elapsed < required_stop_time
-                    cmd = (0.0, [0.0, 0.0, 0.0], true)
-                else
-                    cmd = (steering_angle, [3.0, 0, 0], true)
-                    at_stop_sign = false
-                    stop_timer_started = false
-                end
-            else
-                cmd = (steering_angle, [v, 0, 0], true)
-            end
-        else
-            # Regular driving
-            speed = v > 6 ? -1.0 : 1.0
-            cmd = (steering_angle, [3.0 * speed, 0, 0], true)
-        end
+        #         if elapsed < required_stop_time
+        #             cmd = (0.0, [0.0, 0.0, 0.0], true)
+        #         else
+        #             cmd = (steering_angle, [3.0, 0, 0], true)
+        #             at_stop_sign = false
+        #             stop_timer_started = false
+        #         end
+        #     else
+        #         cmd = (steering_angle, [v, 0, 0], true)
+        #     end
+        # else
+        #     # Regular driving
+        #     speed = v > 6 ? -1.0 : 1.0
+        #     cmd = (steering_angle, [3.0 * speed, 0, 0], true)
+        # end
+
+        speed = v > 6 ? -1.0 : 1.0
+        cmd = (steering_angle, 3.0*speed, true)
 
         if current_segment_index == 1 && t <= 0.1
             current_segment_index += 1
@@ -453,16 +465,18 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     imu_channel = Channel{IMUMeasurement}(32)
     cam_channel = Channel{CameraMeasurement}(32)
     gt_channel = Channel{GroundTruthMeasurement}(32)
-    target_segment_channel = Channel{Int}(1)
 
     localization_state_channel = Channel{MyLocalizationType}(1)
+    target_segment_channel = Channel{Int}(1)
     perception_state_channel = Channel{MyPerceptionType}(1)
-
     shutdown_channel = Channel{Bool}(1)
+
     put!(shutdown_channel, false)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
+
+    put!(target_segment_channel, target_map_segment)
 
     error_mon = errormonitor(@async while true
         # This while loop reads to the end of the socket stream (makes sure you
@@ -482,6 +496,12 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
         end
         !received && continue
         target_map_segment = measurement_msg.target_segment
+        old_target_segment = fetch(target_segment_channel)
+        if target_map_segment != old_target_segment
+            take!(target_segment_channel)
+            put!(target_segment_channel, target_map_segment)
+        end
+
         ego_vehicle_id = measurement_msg.vehicle_id
         for meas in measurement_msg.measurements
             if meas isa GPSMeasurement
@@ -500,7 +520,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     push!(tasks, error_mon)
     push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
     #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
-    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map, socket))
+    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
 
     for t in tasks
