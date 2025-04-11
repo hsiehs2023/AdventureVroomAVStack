@@ -508,7 +508,7 @@ function decision_making(localization_state_channel,
         latest_localization_state = fetch(localization_state_channel)
         latest_perception_state = fetch(perception_state_channel)
 
-        # figure out what to do ... setup motion planning problem etc
+        # figure out what to do .. setup motion planning problem etc
         steering_angle = 0.0
         target_vel = 0.0
         cmd = (steering_angle, target_vel, true)
