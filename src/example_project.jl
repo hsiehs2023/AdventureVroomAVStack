@@ -180,38 +180,41 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     zs = Vector{Float64}[]
 
     while true
-
         fetch(shutdown_channel) && break
-
-        # for k = 1:10
-        isready(shutdown_channel) && break
-        fresh_gps_meas = []
-        #@info("Channel size: ", length(gps_channel))
-        #@info("taking a meas")
-        # meas = take!(gps_channel)
-        # @info(meas)
+    
+        @info "[localize] Waiting for gps_channel..."
         while !isready(gps_channel)
             sleep(0.001)
+            fetch(shutdown_channel) && break
         end
+        @info "[localize] Got GPS measurement"
         
+        fresh_gps_meas = []
         while isready(gps_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
-
-        fresh_imu_meas = []
+    
+        @info "[localize] Waiting for imu_channel..."
         while !isready(imu_channel)
             sleep(0.001)
+            fetch(shutdown_channel) && break
         end
+        @info "[localize] Got IMU measurement"
+    
+        fresh_imu_meas = []
         while isready(imu_channel)
-            isready(shutdown_channel) && break
+            fetch(shutdown_channel) && break
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
         
-        # process measurements
-        take!(localization_state_channel)
+        @info "[localize] Try to get localization"
+        if isready(localization_state_channel)
+            take!(localization_state_channel)
+        end
+        @info "[localize] Got localization"
 
         fresh_gt_meas = []
         while !isready(gt_channel)
@@ -228,97 +231,112 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         Δ = current_timestamp - last_timestamp
         last_timestamp = current_timestamp
 
+        #NEVER GET TO TRY BLOCK
+
         #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
         #TODO add in these measurements into μs (velocities can remain 0)
-        alpha = fresh_gps_meas[end].heading
-        # μs = Diagonal([fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel, fresh_imu_meas[end].angular_vel]) #TODO: Gloria: is this meant to be a matrix or vector
-        μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2), fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3], fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
-        linear_velocity = fresh_imu_meas[end].linear_vel
-        angular_velocity = fresh_imu_meas[end].angular_vel
-        #Δ = 0.1
-        position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
-        q = [cos(alpha/2), 0, 0, sin(alpha/2)]
+        try
+            @info "[localize] Starting state estimation..."
+            # everything between IMU and put!(localization_state_channel, ...)
+            alpha = fresh_gps_meas[end].heading
+            μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2),
+                    fresh_imu_meas[end].linear_vel[1], fresh_imu_meas[end].linear_vel[2], fresh_imu_meas[end].linear_vel[3],
+                    fresh_imu_meas[end].angular_vel[1], fresh_imu_meas[end].angular_vel[2], fresh_imu_meas[end].angular_vel[3]]]
+        
+            linear_velocity = fresh_imu_meas[end].linear_vel
+            angular_velocity = fresh_imu_meas[end].angular_vel
+            #Δ = 0.1
+            position = [fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 1.0]
+            q = [cos(alpha/2), 0, 0, sin(alpha/2)]
 
-        # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
-        xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
-        x_prev = xₖ
-        zₖ_gps = VehicleSim.h_gps(xₖ)
-        zₖ_imu = h_imu(xₖ)
-        zₖ = vcat(zₖ_gps, zₖ_imu)
+            # TODO We need to figure out an appropriate amount of uncertainty (proc_cov) a couple centimeters for position, add a bit for velocities and heading
+            xₖ = VehicleSim.rigid_body_dynamics(position, q, linear_velocity, angular_velocity, Δ)
+            x_prev = xₖ
+            zₖ_gps = VehicleSim.h_gps(xₖ)
+            zₖ_imu = h_imu(xₖ)
+            zₖ = vcat(zₖ_gps, zₖ_imu)
 
 
-        """
-        xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
-        A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
-        B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
-        L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
-        c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
-        μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
-        = f(μₖ₋₁, mₖ, 0, Δ)
-        Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
-        C = ∇ₓ h(μ̂), 
-        d = h(μ̂) - Cμ̂
-        Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
-        μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
-        """
-        A = VehicleSim.Jac_x_f(μs[end], Δ)
-        b = VehicleSim.f(μs[end], Δ) - A*μs[end]
-        μ_hat= A*μs[end] + b
-        Σ_hat = A*Σs[end]*A' + proc_cov
-        C_gps = VehicleSim.Jac_h_gps(μ_hat)
-        C_imu = Jac_h_imu(μ_hat)
-        C = vcat(C_gps, C_imu)
-        d_gps = VehicleSim.h_gps(μ_hat)
-        d_imu = h_imu(μ_hat)
-        d = vcat(d_gps, d_imu) - C*μ_hat
+            """
+            xₖ = f(xₖ₋₁, uₖ, ωₖ, Δ), where Δ is the time difference between times k and k-1.
+            A = ∇ₓf(μₖ₋₁, mₖ, 0, Δ),
+            B = ∇ᵤf(μₖ₋₁, mₖ, 0, Δ),
+            L = ∇ω f(μₖ₋₁, mₖ, 0, Δ),
+            c = f(μₖ₋₁, mₖ, 0, Δ) - Aμₖ₋₁ - Bmₖ - L*0
+            μ̂ = Aμₖ₋₁ + Bmₖ + L*0 + c
+            = f(μₖ₋₁, mₖ, 0, Δ)
+            Σ̂ = A Σₖ₋₁ A' + B proc_cov B' + L dist_cov L'
+            C = ∇ₓ h(μ̂), 
+            d = h(μ̂) - Cμ̂
+            Σₖ = (Σ̂⁻¹ + C' (meas_var)⁻¹ C)⁻¹
+            μₖ = Σₖ ( Σ̂⁻¹ μ̂ + C' (meas_var)⁻¹ (zₖ - d) )
+            """
+            A = VehicleSim.Jac_x_f(μs[end], Δ)
+            b = VehicleSim.f(μs[end], Δ) - A*μs[end]
+            μ_hat= A*μs[end] + b
+            Σ_hat = A*Σs[end]*A' + proc_cov
+            C_gps = VehicleSim.Jac_h_gps(μ_hat)
+            C_imu = Jac_h_imu(μ_hat)
+            C = vcat(C_gps, C_imu)
+            d_gps = VehicleSim.h_gps(μ_hat)
+            d_imu = h_imu(μ_hat)
+            d = vcat(d_gps, d_imu) - C*μ_hat
 
-        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
-        Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
-        μ = Σ*(inv(Σ_hat) *μ_hat + C'*(inv(meas_cov))*(zₖ - d))
-        push!(μs, μ)
-        push!(Σs, Σ)
-        push!(zs, zₖ)
+            # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+            Σ = inv(inv(Σ_hat) + C' * inv(meas_cov) * C)
+            μ = Σ*(inv(Σ_hat) *μ_hat + C'*(inv(meas_cov))*(zₖ - d))
+            push!(μs, μ)
+            push!(Σs, Σ)
+            push!(zs, zₖ)
 
-        #zₖ = h_imu(xₖ)
-        #C_imu = Jac_h_imu(μ_hat)
-        #d_imu = h_imu(μ_hat) - C_imu*μ_hat
+            #zₖ = h_imu(xₖ)
+            #C_imu = Jac_h_imu(μ_hat)
+            #d_imu = h_imu(μ_hat) - C_imu*μ_hat
 
-        # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
-        # Σ = inv(inv(Σ_hat) + C_imu' * inv(meas_cov_imu) * C_imu)
-        # μ = Σ*(inv(Σ_hat) *μ_hat + C_imu'*(inv(meas_cov_imu))*(zₖ - d_imu))
-        # push!(μs, μ)
-        # push!(Σs, Σ)
-        # push!(zs, zₖ)
+            # Σ = (Σ_hat \ I + C' * (meas_var \ I) * C) \ I
+            # Σ = inv(inv(Σ_hat) + C_imu' * inv(meas_cov_imu) * C_imu)
+            # μ = Σ*(inv(Σ_hat) *μ_hat + C_imu'*(inv(meas_cov_imu))*(zₖ - d_imu))
+            # push!(μs, μ)
+            # push!(Σs, Σ)
+            # push!(zs, zₖ)
 
-        push!(gt_states, xₖ)
-        push!(timesteps, Δ)
+            push!(gt_states, xₖ)
+            push!(timesteps, Δ)
 
-        if true
-            # @info("Timestep ", k, ":")
-            # #@info("   Ground truth (x,y): ", xₖ[1:2])
-            # @info("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
-            # @info("   Estimated (x,y): ", μ[1:3])
-            # #@info("   Ground truth v: ", xₖ[3])
-            # @info("   estimated q: ", μ[4:7])
-            # #@info("   Ground truth θ: ", xₖ[4])
-            # @info("   estimated linear: ", μ[8:10])
-            # @info("   estimated angular: ", μ[11:13])
-            # @info("   measurement received: ", zₖ)
-            # @info("   Uncertainty measure (det(cov)): ", det(Σ))
+            if true
+                # @info("Timestep ", k, ":")
+                # #@info("   Ground truth (x,y): ", xₖ[1:2])
+                # @info("   Ground truth 2 (x,y): ", fresh_gt_meas[end])
+                # @info("   Estimated (x,y): ", μ[1:3])
+                # #@info("   Ground truth v: ", xₖ[3])
+                # @info("   estimated q: ", μ[4:7])
+                # #@info("   Ground truth θ: ", xₖ[4])
+                # @info("   estimated linear: ", μ[8:10])
+                # @info("   estimated angular: ", μ[11:13])
+                # @info("   measurement received: ", zₖ)
+                # @info("   Uncertainty measure (det(cov)): ", det(Σ))
 
-            
-            @info "   Ground truth (x,y): $(μs[2][1:3])"
-            @info @info "   estimated: $(μ[1:3])"
+                
+                @info "   Ground truth (x,y): $(μs[2][1:3])"
+                @info @info "   estimated: $(μ[1:3])"
 
+            end
+
+
+
+            localization_state = MyLocalizationType(μ[1:3], μ[4:7])
+            @info "[localize] About to write localization_state to channel"
+            if isready(localization_state_channel)
+                take!(localization_state_channel)
+            end
+            put!(localization_state_channel, localization_state)
+            @info "[localize] Wrote localization_state!"
+        catch e
+            @error "[localize] ERROR before writing localization_state: $e"
+            for (i, frame) in enumerate(Base.catch_backtrace())
+                println(stderr, "[$i] $(Base.show_backtrace_entry(frame))")
+            end
         end
-
-
-
-        localization_state = MyLocalizationType(μ[1:3], μ[4:7])
-        if isready(localization_state_channel)
-            take!(localization_state_channel)
-        end
-        put!(localization_state_channel, localization_state)
     end 
 end
 
@@ -417,80 +435,108 @@ end
 ## Ellie Chason - end - ##
 
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel, shutdown_channel)
+    @info "[perception] Running perception loop"
     tracks = TrackedObstacle[]
     next_track_id = 1
     
-    while true
-        fetch(shutdown_channel) && break
+    try
+        while true
+            fetch(shutdown_channel) && break
 
-        fresh_cam_meas = []
-        while isready(cam_meas_channel)
-            meas = take!(cam_meas_channel)
-            push!(fresh_cam_meas, meas)
-        end
-        
-        # Skip if no measurements
-        if isempty(fresh_cam_meas)
+            fresh_cam_meas = []
+
+            if !isready(cam_meas_channel)
+                sleep(0.01)
+                continue
+            end
+
+            while isready(cam_meas_channel)
+                push!(fresh_cam_meas, take!(cam_meas_channel))
+            end
+
+            @info "[perception] Got $(length(fresh_cam_meas)) fresh camera measurements"
+
+            if isempty(fresh_cam_meas)
+                continue
+            end
+
+            detections = ObstacleDetection[]
+            try
+                @info "[perception] Fetching localization state..."
+                latest_localization_state = fetch(localization_state_channel)
+                @info "[perception] Got localization: $(latest_localization_state)"
+            
+                @info "[perception] fresh_cam_meas = $fresh_cam_meas"
+                @info "[perception] typeof(fresh_cam_meas[1]) = $(typeof(fresh_cam_meas[1]))"
+            
+                for cam_meas in fresh_cam_meas
+                    @info "CameraMeasurement detail: $(cam_meas)"
+                    for box in cam_meas.bounding_boxes
+                        pos, size = pixel_to_world(latest_localization_state, cam_meas, box)
+                        push!(detections, ObstacleDetection(pos, size, SVector(0.0, 0.0), 0.8, 0))
+                    end
+                end
+            catch e
+                @error "[perception] CRASH: $e"
+                Base.show_backtrace(stderr, catch_backtrace())
+            end
+
+            for track in tracks
+                dt = current_time - track.last_seen
+                ekf_predict!(track, dt)
+            end
+
+            assignment = associate_tracks(detections, tracks)
+
+            assigned_tracks = Set{Int}()
+            for i in 1:length(detections)
+                j = assignment[i]
+                if j != 0
+                    ekf_update!(tracks[j], detections[i].position[1:2])
+                    tracks[j].last_seen = current_time
+                    assigned_tracks |= Set([j])
+                    detections[i] = ObstacleDetection(
+                        detections[i].position, 
+                        detections[i].size, 
+                        tracks[j].x[3:4], 
+                        detections[i].confidence, 
+                        tracks[j].id)
+                else
+                    pos = detections[i].position[1:2]
+                    new_track = TrackedObstacle(next_track_id, SVector(pos[1], pos[2], 0.0, 0.0), I(4), current_time, 0.8)
+                    detections[i] = ObstacleDetection(
+                        detections[i].position, 
+                        detections[i].size, 
+                        new_track.x[3:4], 
+                        detections[i].confidence, 
+                        next_track_id)
+                    push!(tracks, new_track)
+                    next_track_id += 1
+                end
+            end
+
+            tracks = [t for t in tracks if current_time - t.last_seen < 1.0]
+
+            perception_state = MyPerceptionType(
+                current_time,
+                detections,
+                Vector{LaneMarking}()
+            )
+
+            @info "[perception] Writing $(length(detections)) detections to perception channel"
+
+            while isready(perception_state_channel)
+                take!(perception_state_channel)
+            end
+            put!(perception_state_channel, perception_state)
+
+            @info "[perception] Wrote perception with $(length(perception_state.obstacles)) obstacles"
+
             sleep(0.01)
-            continue
         end
-        
-        latest_localization_state = fetch(localization_state_channel)
-        current_time = fresh_cam_meas[end].time
-
-    
-        # Convert bounding boxes to world positions
-        detections = ObstacleDetection[]
-        for cam_meas in fresh_cam_meas
-            for box in cam_meas.bounding_boxes
-                pos, size = pixel_to_world(latest_localization_state, cam_meas, box)
-                push!(detections, ObstacleDetection(pos, size, SVector(0.0, 0.0), 0.8, 0)) # 0 is placeholder id
-            end
-        end
-
-        # Predict all tracks
-        for track in tracks
-            dt = current_time - track.last_seen
-            ekf_predict!(track, dt)
-        end
-
-        # Data association
-        assignment = associate_tracks(detections, tracks)
-
-        assigned_tracks = Set{Int}()
-        for i in 1:length(detections)
-            j = assignment[i]
-            if j != 0
-                ekf_update!(tracks[j], detections[i].position[1:2])
-                tracks[j].last_seen = current_time
-                assigned_tracks |= Set([j])
-                detections[i] = ObstacleDetection(detections[i].position, detections[i].size, tracks[j].x[3:4], detections[i].confidence, tracks[j].id)
-            else
-                pos = detections[i].position[1:2]
-                new_track = TrackedObstacle(next_track_id, SVector(pos[1], pos[2], 0.0, 0.0), I(4), current_time, 0.8)
-                detections[i] = ObstacleDetection(detections[i].position, detections[i].size, new_track.x[3:4], detections[i].confidence, next_track_id)
-                push!(tracks, new_track)
-                next_track_id += 1
-            end
-        end
-
-        # Prune old tracks
-        tracks = [t for t in tracks if current_time - t.last_seen < 1.0]
-
-        # Create perception state
-        perception_state = MyPerceptionType(
-            current_time,  # Use latest measurement time
-            detections,
-            Vector{LaneMarking}()  # Lane detection not implemented here
-        )
-        
-        # Update perception state channel
-        if isready(perception_state_channel)
-            take!(perception_state_channel)
-        end
-        put!(perception_state_channel, perception_state)
-        
-        sleep(0.01)  # Avoid busy waiting
+    catch e
+        @error "[perception] CRASHED: $e"
+        Base.show_backtrace(stderr, catch_backtrace())
     end
 end
 
@@ -539,7 +585,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     target_segment_channel = Channel{Int}(1)
     shutdown_channel = Channel{Bool}(1)
     put!(shutdown_channel, false)
-    localization_state_channel = Channel{MyLocalizationType}(1)
+    
     #perception_state_channel = Channel{MyPerceptionType}(1)
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
@@ -576,11 +622,13 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
             elseif meas isa IMUMeasurement
                 !isfull(imu_channel) && put!(imu_channel, meas)
             elseif meas isa CameraMeasurement
+                @info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes"
                 !isfull(cam_channel) && put!(cam_channel, meas)
             elseif meas isa GroundTruthMeasurement
                 !isfull(gt_channel) && put!(gt_channel, meas)
             end
         end
+        
     end)
 
     
@@ -614,6 +662,7 @@ errormonitor(@async begin
     while true
         @info "TEST PERCEPTION"
         sleep(1.0)  
+        
         fetch(shutdown_channel) && break
 
         # Add debug info to track channel readiness
