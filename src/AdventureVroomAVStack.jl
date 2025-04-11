@@ -6,6 +6,7 @@ using Serialization
 using StaticArrays
 using LinearAlgebra
 using Rotations
+using Hungarian
 
 include("client.jl")
 include("example_project.jl")

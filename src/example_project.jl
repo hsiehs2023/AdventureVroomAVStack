@@ -442,7 +442,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     try
         while true
             fetch(shutdown_channel) && break
-
+            current_time = time()
             fresh_cam_meas = []
 
             if !isready(cam_meas_channel)
