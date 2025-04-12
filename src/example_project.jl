@@ -61,24 +61,22 @@ function ekf_update!(track::TrackedObstacle, z::SVector{2, Float64})
     track.P = (I(4) - K * H) * track.P
 end
 
-function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle})
+function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=5.0)
     n = length(detections)
     m = length(tracks)
-
     if n == 0 || m == 0
-        return zeros(Int, n)  # no matches if either is empty
+        return zeros(Int, n)
     end
 
     cost_matrix = fill(1e6, n, m)
-
     for i in 1:n
         for j in 1:m
             d = norm(detections[i].position[1:2] - tracks[j].x[1:2])
-            cost_matrix[i, j] = d
+            cost_matrix[i, j] = d < threshold ? d : 1e6  # only consider matches within threshold
         end
     end
 
-    assignment = hungarian(cost_matrix)
+    assignment = first(hungarian(cost_matrix))
     return assignment
 end
 
@@ -347,6 +345,45 @@ function perspective_projection(point_3d, focal_length)
     return SVector{2, Float64}(x, y)
 end
 
+function jacobian_projection_analytic(point_3d::SVector{3,Float64}, focal_length::Float64)
+    X, Y, Z = point_3d
+    fx = focal_length
+    J = @SMatrix [
+        fx/Z    0     -fx*X/(Z^2);
+         0     fx/Z   -fx*Y/(Z^2)
+    ]
+    return J
+end
+
+function numeric_jacobian(f, x::SVector{3,Float64}; ε=1e-6)
+    n = length(x)
+    m = length(f(x))
+    J = zeros(m, n)
+    for i in 1:n
+        dx = zero(x)
+        dx = dx + ε * (i == 1 ? SVector(1.0,0.0,0.0) : (i == 2 ? SVector(0.0,1.0,0.0) : SVector(0.0,0.0,1.0)))
+        J[:, i] = (f(x + dx) - f(x - dx)) / (2ε)
+    end
+    return J
+end
+
+function test_projection_jacobian()
+    point = SVector{3, Float64}(3.0, 4.0, 10.0)
+    f = 800.0
+
+    f_proj = p -> perspective_projection(p, f)
+
+    J_analytic = jacobian_projection_analytic(point, f)
+    J_numeric = numeric_jacobian(f_proj, point)
+
+    println("Analytic Jacobian:")
+    println(J_analytic)
+    println("Numeric Jacobian:")
+    println(J_numeric)
+    println("Difference:")
+    println(J_analytic - J_numeric)
+end
+
 function pixel_to_world(localization_state, cam_meas, box)
     # Create camera transformation matrix
     cam_id = cam_meas.camera_id
@@ -361,7 +398,8 @@ function pixel_to_world(localization_state, cam_meas, box)
     T_world_body = [R localization_state.position; 0 0 0 1]
     
     # Get world to camera transform
-    T_world_camrot = T_world_body * [T_body_camrot; 0 0 0 1]
+    T_body_camrot_h = [T_body_camrot; 0 0 0 1]  # make 4×4
+    T_world_camrot = T_world_body * T_body_camrot_h
     
     # Extract bounding box coordinates
     top, left, bottom, right = box
@@ -378,8 +416,8 @@ function pixel_to_world(localization_state, cam_meas, box)
     cam_top = (top - image_height/2) * pixel_len
     cam_bottom = (bottom - image_height/2) * pixel_len
     
-    # Assume a fixed depth for objects
-    depth = 20.0  
+    box_height = abs(bottom - top)
+    depth = max(focal_len * 1.5 / (box_height * pixel_len), 1)
     
     # Project to 3D points in camera frame
     p1 = SVector{3, Float64}(cam_left * depth / focal_len, cam_top * depth / focal_len, depth)
@@ -487,11 +525,12 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             end
 
             assignment = associate_tracks(detections, tracks)
+            assignment = [j > length(tracks) ? 0 : j for j in assignment]
 
             assigned_tracks = Set{Int}()
             for i in 1:length(detections)
                 j = assignment[i]
-                if j != 0
+                if j != 0 && j <= length(tracks)
                     ekf_update!(tracks[j], detections[i].position[1:2])
                     tracks[j].last_seen = current_time
                     assigned_tracks |= Set([j])
@@ -503,19 +542,37 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                         tracks[j].id)
                 else
                     pos = detections[i].position[1:2]
-                    new_track = TrackedObstacle(next_track_id, SVector(pos[1], pos[2], 0.0, 0.0), I(4), current_time, 0.8)
+                    # EKF mean: use detection position, assume zero velocity
+                    x₀ = SVector(pos[1], pos[2], 0.0, 0.0)
+
+                    # EKF covariance: moderate confidence in position, high uncertainty in velocity
+                    P₀ = Diagonal([0.5^2, 0.5^2, 5.0^2, 5.0^2])  # variances
+                    new_track = TrackedObstacle(
+                        next_track_id,
+                        x₀,
+                        P₀,
+                        current_time,
+                        0.8
+                    )
+                    # Add logging for visibility
+                    @info "[init] New EKF track $next_track_id"
+                    @info "   μ₀ = $x₀"
+                    @info "   Σ₀ = \n$P₀"
+
                     detections[i] = ObstacleDetection(
                         detections[i].position, 
                         detections[i].size, 
                         new_track.x[3:4], 
                         detections[i].confidence, 
-                        next_track_id)
+                        next_track_id
+                    )
+
                     push!(tracks, new_track)
                     next_track_id += 1
                 end
             end
 
-            tracks = [t for t in tracks if current_time - t.last_seen < 1.0]
+            tracks = [t for t in tracks if (current_time - t.last_seen < 2.0) || (t.confidence > 0.3)]
 
             perception_state = MyPerceptionType(
                 current_time,
@@ -574,6 +631,25 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     msg = deserialize(socket) # Visualization info
     @info msg
 
+    test_point = SVector(3.0, 4.0, 10.0)
+    f = 800.0
+
+    f_proj = p -> perspective_projection(p, f)
+    J_analytic = jacobian_projection_analytic(test_point, f)
+    J_numeric = numeric_jacobian(f_proj, test_point)
+
+    diff = J_analytic - J_numeric
+    max_diff = maximum(abs.(diff))
+
+    @info "[jacobian-test] Analytic Jacobian:\n$J_analytic"
+    @info "[jacobian-test] Numeric Jacobian:\n$J_numeric"
+    @info "[jacobian-test] Difference:\n$diff"
+    if max_diff < 1e-5
+        @info "[jacobian-test] PASSED: max error $max_diff"
+    else
+        @error "[jacobian-test] FAILED: max error $max_diff exceeds tolerance"
+    end
+
     gps_channel = Channel{GPSMeasurement}(32)
     imu_channel = Channel{IMUMeasurement}(32)
     cam_channel = Channel{CameraMeasurement}(32)
@@ -587,6 +663,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     put!(shutdown_channel, false)
     
     #perception_state_channel = Channel{MyPerceptionType}(1)
+
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
     ego_vehicle_id = 0 # (not a valid id, will be overwritten by message. This is used for discerning ground-truth messages)
