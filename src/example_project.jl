@@ -419,37 +419,37 @@ function decision_making(localization_state_channel,
     try
         if VehicleSim.stop_sign in lanes
             println("first level")
-            if !at_stop_sign && t > 0.80
+            if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
                 cmd = (steering_angle, target_speed, true)
                 println("still decel")
 
-                if target_speed < 0.1
-                    at_stop_sign = true
-                    stop_start_time = current_time
-                    cmd = (0.0, 0.0, true)
-                end
+            #     if target_speed < 0.1
+            #         at_stop_sign = true
+            #         stop_start_time = current_time
+            #         cmd = (0.0, 0.0, true)
+            #     end
 
-            elseif at_stop_sign
-                println("stopped")
-                if !stop_timer_started
-                    stop_timer_started = true
-                    stop_start_time = current_time
-                end
+            # elseif at_stop_sign
+            #     println("stopped")
+            #     if !stop_timer_started
+            #         stop_timer_started = true
+            #         stop_start_time = current_time
+            #     end
 
-                elapsed = current_time - stop_start_time
+            #     elapsed = current_time - stop_start_time
 
-                if elapsed < required_stop_time
-                    cmd = (0.0, 0.0, true)
-                else
-                    cmd = (steering_angle, target_vel, true)
-                    at_stop_sign = false
-                    stop_timer_started = false
-                    println("Here")
-                    # current_segment_index += 1
-                    # t = -1
-                end
+            #     if elapsed < required_stop_time
+            #         cmd = (0.0, 0.0, true)
+            #     else
+            #         cmd = (steering_angle, target_vel, true)
+            #         at_stop_sign = false
+            #         stop_timer_started = false
+            #         println("Here")
+            #         # current_segment_index += 1
+            #         # t = -1
+            #     end
                 
 
             else
@@ -466,7 +466,7 @@ function decision_making(localization_state_channel,
         return nothing
     end
 
-        if 0.9 ≤ t     
+        if 0.9 ≤ t 
             current_segment_index += 1
         end
         println("here2")
