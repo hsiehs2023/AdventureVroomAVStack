@@ -340,6 +340,8 @@ function decision_making(localization_state_channel,
     required_stop_time = 3.0  # seconds to wait at stop sign
     while true
         fetch(shutdown_channel) && break
+
+        t = -1.0
         
         latest_localization_state = fetch(localization_state_channel)
         #latest_perception_state = fetch(perception_state_channel)
@@ -350,7 +352,8 @@ function decision_making(localization_state_channel,
         ls = 0.1 #lookahead time
         L=13
 
-        lookahead_radius = v * ls
+        # lookahead_radius = v * ls
+        lookahead_radius = 10.0
         current_segment = polyline[current_segment_index]
 
         p1 = current_segment[1]
@@ -360,6 +363,7 @@ function decision_making(localization_state_channel,
         c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
         discriminant = b^2 - 4 * a * c
+        center = SVector(c1, c2)
 
         if discriminant >= 0
             sqrt_disc = sqrt(discriminant)
@@ -367,11 +371,10 @@ function decision_making(localization_state_channel,
             t_lower = (-b - sqrt_disc) / (2 * a)
             valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
             t = isempty(valid_t) ? -1 : first(valid_t)
-        else t = -1.0 #HELPPPPPPP
+            q = SVector((t * (p2 - p1) + p1)) - center
+        else 
+            q = center
         end
-
-        center = SVector(c1, c2)
-        q = SVector((t * (p2 - p1) + p1)) - center
 
         heading = [cos(θ); sin(θ)]
         dot_value = dot(q, heading) / (norm(q) * norm(heading))
@@ -435,12 +438,10 @@ function decision_making(localization_state_channel,
         #     cmd = (steering_angle, [3.0 * speed, 0, 0], true)
         # end
 
-        speed = v > 6 ? -1.0 : 1.0
-        cmd = (steering_angle, 3.0*speed, true)
+        # speed = v > 6 ? -1.0 : 1.0
+        # cmd = (steering_angle, 3.0*speed, true)
 
-        if current_segment_index == 1 && t <= 0.1
-            current_segment_index += 1
-        elseif 0.9 ≤ t ≤ 1.1 && current_segment_index < length(path.segments)
+        if 0.9 ≤ t ≤ 1.1    
             current_segment_index += 1
         end
 
