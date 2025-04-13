@@ -1,3 +1,5 @@
+using VehicleSim
+
 struct MyLocalizationType
     # TODO: add timestamp and perhaps orientation
     position::SVector{3, Float64}
@@ -11,9 +13,10 @@ struct MyPerceptionType
 end
 
 #Performs routing on current segment found from ground truth position (development only)
-function routing(gt_channel, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment})
+function routing(localization_state_channel, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment})
     #Idea 1 for finding current position
-    gt_meas = fetch(gt_channel)
+    # gt_meas = fetch(gt_channel)
+    gt_meas = fetch(localization_state_channel)
     pos = gt_meas.position
     
     #Idea 2 for finding current position
@@ -309,7 +312,7 @@ function decision_making(localization_state_channel,
     target_segment = 80 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
     # target_segment = fetch(target_segment_channel)
 
-    path = routing(gt_channel, target_segment, map) #this will be the list of segments returned by routing function
+    path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
     polyline = [] #polyline we create
     for i in 1:length(path)-1
         pt = compute_midpoints(path[i])
@@ -321,13 +324,13 @@ function decision_making(localization_state_channel,
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
     current_segment_index = 1
-
+    println(polyline)
 
     # --- State tracking for stop sign ---
     at_stop_sign = false
     stop_timer_started = false
     stop_start_time = 0.0
-    required_stop_time = 3.0  # seconds to wait at stop sign
+    required_stop_time = 10.0  # seconds to wait at stop sign
     while true
         fetch(shutdown_channel) && return
 
@@ -352,9 +355,11 @@ function decision_making(localization_state_channel,
         a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
         b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
         q = nothing
+        println("Here4")
 
         while true
             fetch(shutdown_channel) && return
+            println("HERE 5")
             
             c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
@@ -400,58 +405,73 @@ function decision_making(localization_state_channel,
         # figure out what to do ... setup motion planning problem etc
         steering_angle = turn
         # if path[current_segment_index].lane_types == stop_sign
-        target_vel = 3
+        target_vel = 5
         cmd = (steering_angle, target_vel, true)
 
         # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
         # we can change this to include OR if perception takes in another vehicle in line of sight
             
-        # current_time = time()
-        # lane_type = path[current_segment_index].lane_types
+        current_time = time()
+        lanes = path[current_segment_index].lane_types
+        println("Before if")
 
-        # if lane_type == stop_sign
-        #     if !at_stop_sign && t > 0.7
-        #         decel_factor = clamp(1.0 - (t - 0.7) / 0.3, 0.0, 1.0)
-        #         target_speed = 3.0 * decel_factor
-        #         cmd = (steering_angle, [target_speed, 0, 0], true)
+        # if :stop_sign in lanes
+    try
+        if VehicleSim.stop_sign in lanes
+            println("first level")
+            if !at_stop_sign && t > 0.80
+                # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
+                target_speed = 0.0
+                cmd = (steering_angle, target_speed, true)
+                println("still decel")
 
-        #         if target_speed < 0.2
-        #             at_stop_sign = true
-        #             stop_start_time = current_time
-        #         end
+                if target_speed < 0.1
+                    at_stop_sign = true
+                    stop_start_time = current_time
+                    cmd = (0.0, 0.0, true)
+                end
 
-        #     elseif at_stop_sign
-        #         if !stop_timer_started
-        #             stop_timer_started = true
-        #             stop_start_time = current_time
-        #         end
+            elseif at_stop_sign
+                println("stopped")
+                if !stop_timer_started
+                    stop_timer_started = true
+                    stop_start_time = current_time
+                end
 
-        #         elapsed = current_time - stop_start_time
+                elapsed = current_time - stop_start_time
 
-        #         if elapsed < required_stop_time
-        #             cmd = (0.0, [0.0, 0.0, 0.0], true)
-        #         else
-        #             cmd = (steering_angle, [3.0, 0, 0], true)
-        #             at_stop_sign = false
-        #             stop_timer_started = false
-        #         end
-        #     else
-        #         cmd = (steering_angle, [v, 0, 0], true)
-        #     end
-        # else
-        #     # Regular driving
-        #     speed = v > 6 ? -1.0 : 1.0
-        #     cmd = (steering_angle, [3.0 * speed, 0, 0], true)
-        # end
+                if elapsed < required_stop_time
+                    cmd = (0.0, 0.0, true)
+                else
+                    cmd = (steering_angle, target_vel, true)
+                    at_stop_sign = false
+                    stop_timer_started = false
+                    println("Here")
+                    # current_segment_index += 1
+                    # t = -1
+                end
+                
 
-        # speed = v > 6 ? -1.0 : 1.0
-        # cmd = (steering_angle, 3.0*speed, true)
+            else
+                cmd = (steering_angle, target_vel, true)
+            end
+        else
+            println("Not stop sign")
+            # Regular driving
+            speed = v > 6 ? -1.0 : 1.0
+            cmd = (steering_angle, target_vel * speed, true)
+        end
+    catch e
+        println("ERROR: $e")
+        return nothing
+    end
 
         if 0.9 ≤ t     
             current_segment_index += 1
         end
-
+        println("here2")
         serialize(socket, cmd)
+        println("Here3")
     end
 
 end
