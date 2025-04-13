@@ -308,15 +308,6 @@ function decision_making(localization_state_channel,
 
     target_segment = 80 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
     # target_segment = fetch(target_segment_channel)
-    # while !isready(target_segment_channel)
-    #     fetch(shutdown_channel) && break
-    #     sleep(0.001)
-    # end
-    # while isready(target_segment_channel)
-    #     fetch(shutdown_channel) && break
-    #     meas = take!(target_segment_channel)
-    #     target_segment = meas
-    # end
 
     path = routing(gt_channel, target_segment, map) #this will be the list of segments returned by routing function
     polyline = [] #polyline we create
