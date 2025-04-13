@@ -62,7 +62,7 @@ function ekf_update!(track::TrackedObstacle, z)
     track.P = (I(4) - K * H) * track.P
 end
 
-function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle})
+function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=5.0)
     n = length(detections)
     m = length(tracks)
 
@@ -75,15 +75,53 @@ function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{
     for i in 1:n
         for j in 1:m
             d = norm(detections[i].position[1:2] - tracks[j].x[1:2])
-            cost_matrix[i, j] = d
+            cost_matrix[i, j] = d < threshold ? d : 1e6  # only consider matches within threshold
         end
     end
 
     # Hungarian returns (assignment, cost) tuple 
-    assignment, cost = hungarian(cost_matrix)
+    assignment = first(hungarian(cost_matrix))
     return assignment
 end
 
+function jacobian_projection_analytic(point_3d::SVector{3,Float64}, focal_length::Float64)
+    X, Y, Z = point_3d
+    fx = focal_length
+    J = @SMatrix [
+        fx/Z    0     -fx*X/(Z^2);
+         0     fx/Z   -fx*Y/(Z^2)
+    ]
+    return J
+end
+
+function numeric_jacobian(f, x::SVector{3,Float64}; ε=1e-6)
+    n = length(x)
+    m = length(f(x))
+    J = zeros(m, n)
+    for i in 1:n
+        dx = zero(x)
+        dx = dx + ε * (i == 1 ? SVector(1.0,0.0,0.0) : (i == 2 ? SVector(0.0,1.0,0.0) : SVector(0.0,0.0,1.0)))
+        J[:, i] = (f(x + dx) - f(x - dx)) / (2ε)
+    end
+    return J
+end
+
+function test_projection_jacobian()
+    point = SVector{3, Float64}(3.0, 4.0, 10.0)
+    f = 800.0
+
+    f_proj = p -> perspective_projection(p, f)
+
+    J_analytic = jacobian_projection_analytic(point, f)
+    J_numeric = numeric_jacobian(f_proj, point)
+
+    println("Analytic Jacobian:")
+    println(J_analytic)
+    println("Numeric Jacobian:")
+    println(J_numeric)
+    println("Difference:")
+    println(J_analytic - J_numeric)
+end
 
 function process_gt(
     gt_channel,
@@ -92,125 +130,125 @@ function process_gt(
     perception_state_channel)
 
 
-function convert_gt_to_obstacles(gt_measurements)
-    obstacles = ObstacleDetection[]
-    for gt in gt_measurements
-        # Extract position, checking for valid values
-        position = if all(isfinite.(gt.position))
-            gt.position
-        else
-            SVector{3, Float64}(0.0, 0.0, 0.0)
-        end
-        
-        size = if isdefined(gt, :size) && all(isfinite.(gt.size))
-            gt.size
-        else
-            SVector{3, Float64}(4.0, 2.0, 1.5)  # Default car size
-        end
-        
-        # Extract velocity, checking for valid values
-        velocity = if isdefined(gt, :velocity) && all(isfinite.(gt.velocity[1:2]))
-            gt.velocity[1:2]
-        else
-            SVector{2, Float64}(0.0, 0.0)
-        end
-        
-        # Create the obstacle detection
-        obstacle = ObstacleDetection(
-            position,
-            size,
-            velocity,
-            1.0,  # Confidence = 1.0 for ground truth
-            gt.vehicle_id  # Use vehicle ID as tracking ID
-        )
-        
-        push!(obstacles, obstacle)
-    end
-    
-    return obstacles
-end
-
-# Define the gt_eval_channel if it doesn't exist
-gt_eval_channel = Channel{Vector{ObstacleDetection}}(1)
-put!(gt_eval_channel, Vector{ObstacleDetection}())
-
-try
-    while true
-        if fetch(shutdown_channel)
-            break
-        end
-
-        fresh_gt_meas = []
-        
-        while isready(gt_channel)
-            meas = take!(gt_channel)
-            push!(fresh_gt_meas, meas)
-        end
-
-        if !isempty(fresh_gt_meas)
-            # Transform GT messages into obstacle detections
-            try
-                
-                gt_detections = convert_gt_to_obstacles(fresh_gt_meas)
+    function convert_gt_to_obstacles(gt_measurements)
+        obstacles = ObstacleDetection[]
+        for gt in gt_measurements
+            # Extract position, checking for valid values
+            position = if all(isfinite.(gt.position))
+                gt.position
+            else
+                SVector{3, Float64}(0.0, 0.0, 0.0)
+            end
             
-                
-                # Send ground-truth detections into the eval channel for evaluation
-                if isready(gt_eval_channel)
-                    take!(gt_eval_channel)
-                end
-                put!(gt_eval_channel, gt_detections)
-                
-                # Create a new localization state from ground truth
-                
-                if !isempty(fresh_gt_meas)
-                    ego_gt = fresh_gt_meas[1]  # Just use the first one for simplicity
+            size = if isdefined(gt, :size) && all(isfinite.(gt.size))
+                gt.size
+            else
+                SVector{3, Float64}(4.0, 2.0, 1.5)  # Default car size
+            end
+            
+            # Extract velocity, checking for valid values
+            velocity = if isdefined(gt, :velocity) && all(isfinite.(gt.velocity[1:2]))
+                gt.velocity[1:2]
+            else
+                SVector{2, Float64}(0.0, 0.0)
+            end
+            
+            # Create the obstacle detection
+            obstacle = ObstacleDetection(
+                position,
+                size,
+                velocity,
+                1.0,  # Confidence = 1.0 for ground truth
+                gt.vehicle_id  # Use vehicle ID as tracking ID
+            )
+            
+            push!(obstacles, obstacle)
+        end
+        
+        return obstacles
+    end
+
+    # Define the gt_eval_channel if it doesn't exist
+    gt_eval_channel = Channel{Vector{ObstacleDetection}}(1)
+    put!(gt_eval_channel, Vector{ObstacleDetection}())
+
+    try
+        while true
+            if fetch(shutdown_channel)
+                break
+            end
+
+            fresh_gt_meas = []
+            
+            while isready(gt_channel)
+                meas = take!(gt_channel)
+                push!(fresh_gt_meas, meas)
+            end
+
+            if !isempty(fresh_gt_meas)
+                # Transform GT messages into obstacle detections
+                try
                     
-                    # Extract position and orientation
-                    position = if isdefined(ego_gt, :position) && all(isfinite.(ego_gt.position))
-                        ego_gt.position
-                    else
-                        SVector{3, Float64}(0.0, 0.0, 0.0)
+                    gt_detections = convert_gt_to_obstacles(fresh_gt_meas)
+                
+                    
+                    # Send ground-truth detections into the eval channel for evaluation
+                    if isready(gt_eval_channel)
+                        take!(gt_eval_channel)
+                    end
+                    put!(gt_eval_channel, gt_detections)
+                    
+                    # Create a new localization state from ground truth
+                    
+                    if !isempty(fresh_gt_meas)
+                        ego_gt = fresh_gt_meas[1]  # Just use the first one for simplicity
+                        
+                        # Extract position and orientation
+                        position = if isdefined(ego_gt, :position) && all(isfinite.(ego_gt.position))
+                            ego_gt.position
+                        else
+                            SVector{3, Float64}(0.0, 0.0, 0.0)
+                        end
+                        
+                        orientation = if isdefined(ego_gt, :orientation) && all(isfinite.(ego_gt.orientation))
+                            ego_gt.orientation
+                        else
+                            SVector{4, Float64}(1.0, 0.0, 0.0, 0.0)  # Identity quaternion
+                        end
+                        
+                        new_localization_state = MyLocalizationType(
+                            position,
+                            orientation
+                        )
+                        
+                        if isready(localization_state_channel)
+                            take!(localization_state_channel)
+                        end
+                        put!(localization_state_channel, new_localization_state)
                     end
                     
-                    orientation = if isdefined(ego_gt, :orientation) && all(isfinite.(ego_gt.orientation))
-                        ego_gt.orientation
-                    else
-                        SVector{4, Float64}(1.0, 0.0, 0.0, 0.0)  # Identity quaternion
-                    end
+                    # Create a new perception state with the obstacles
                     
-                    new_localization_state = MyLocalizationType(
-                        position,
-                        orientation
+                    new_perception_state = MyPerceptionType(
+                        time(),
+                        gt_detections,  # Use the converted detections
+                        Vector{LaneMarking}()  # No lane markings for now
                     )
                     
-                    if isready(localization_state_channel)
-                        take!(localization_state_channel)
+                    if isready(perception_state_channel)
+                        take!(perception_state_channel)
                     end
-                    put!(localization_state_channel, new_localization_state)
+                    put!(perception_state_channel, new_perception_state)
+                catch e
+                
                 end
-                
-                # Create a new perception state with the obstacles
-                
-                new_perception_state = MyPerceptionType(
-                    time(),
-                    gt_detections,  # Use the converted detections
-                    Vector{LaneMarking}()  # No lane markings for now
-                )
-                
-                if isready(perception_state_channel)
-                    take!(perception_state_channel)
-                end
-                put!(perception_state_channel, new_perception_state)
-            catch e
-             
             end
+            
+            sleep(0.01)  # Small sleep to avoid busy-waiting
         end
-        
-        sleep(0.01)  # Small sleep to avoid busy-waiting
+    catch e
     end
-catch e
     
-end
 end
 
 function h_imu(x)
@@ -242,7 +280,7 @@ function Jac_h_imu(x)
 end
 
 function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    @info "IN localization"
+    #@info "IN localization"
     # Set up algorithm / initialize variables
     # process measurements
     #TODO change these values to reflect appropriate uncertainties for each type of measurement
@@ -265,12 +303,12 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     while true
         fetch(shutdown_channel) && break
     
-        @info "[localize] Waiting for gps_channel..."
+        #@info "[localize] Waiting for gps_channel..."
         while !isready(gps_channel)
             sleep(0.001)
             fetch(shutdown_channel) && break
         end
-        @info "[localize] Got GPS measurement"
+        #@info "[localize] Got GPS measurement"
         
         fresh_gps_meas = []
         while isready(gps_channel)
@@ -279,12 +317,12 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             push!(fresh_gps_meas, meas)
         end
     
-        @info "[localize] Waiting for imu_channel..."
+        #@info "[localize] Waiting for imu_channel..."
         while !isready(imu_channel)
             sleep(0.001)
             fetch(shutdown_channel) && break
         end
-        @info "[localize] Got IMU measurement"
+        #@info "[localize] Got IMU measurement"
     
         fresh_imu_meas = []
         while isready(imu_channel)
@@ -293,11 +331,11 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             push!(fresh_imu_meas, meas)
         end
         
-        @info "[localize] Try to get localization"
+        #@info "[localize] Try to get localization"
         if isready(localization_state_channel)
             take!(localization_state_channel)
         end
-        @info "[localize] Got localization"
+       # @info "[localize] Got localization"
 
         fresh_gt_meas = []
         while !isready(gt_channel)
@@ -319,7 +357,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         #TODO Get a better estimate of these values. Adjust position to be from initial GPS measurement
         #TODO add in these measurements into μs (velocities can remain 0)
         try
-            @info "[localize] Starting state estimation..."
+            #@info "[localize] Starting state estimation..."
             # everything between IMU and put!(localization_state_channel, ...)
             alpha = fresh_gps_meas[end].heading
             μs = [[fresh_gps_meas[end].long, fresh_gps_meas[end].lat, 2.65, cos(alpha/2), 0, 0, sin(alpha/2),
@@ -400,18 +438,18 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
                 # @info("   Uncertainty measure (det(cov)): ", det(Σ))
 
                 
-                @info "   Ground truth (x,y): $(μs[2][1:3])"
-                @info @info "   estimated: $(μ[1:3])"
+                #@info "   Ground truth (x,y): $(μs[2][1:3])"
+                #@info "   estimated: $(μ[1:3])"
 
             end
 
             localization_state = MyLocalizationType(μ[1:3], μ[4:7])
-            @info "[localize] About to write localization_state to channel"
+            #@info "[localize] About to write localization_state to channel"
             if isready(localization_state_channel)
                 take!(localization_state_channel)
             end
             put!(localization_state_channel, localization_state)
-            @info "[localize] Wrote localization_state!"
+            #@info "[localize] Wrote localization_state!"
         catch e
             @error "[localize] ERROR before writing localization_state: $e"
             for (i, frame) in enumerate(Base.catch_backtrace())
@@ -429,12 +467,12 @@ function perspective_projection(point_3d, focal_length)
 end
 
 function pixel_to_world(localization_state, cam_meas, box)
-    @info "[pixel_to_world] Starting conversion with box: $box"
+    #@info "[pixel_to_world] Starting conversion with box: $box"
     
     try
         # Create camera transformation matrix
         cam_id = cam_meas.camera_id
-        @info "[pixel_to_world] Camera ID: $cam_id"
+        #@info "[pixel_to_world] Camera ID: $cam_id"
         
         # Get camera transform 
         local T_body_cam, T_cam_camrot, T_body_camrot
@@ -442,7 +480,7 @@ function pixel_to_world(localization_state, cam_meas, box)
             T_body_cam = VehicleSim.get_cam_transform(cam_id)
             T_cam_camrot = VehicleSim.get_rotated_camera_transform()
             T_body_camrot = VehicleSim.multiply_transforms(T_body_cam, T_cam_camrot)
-            @info "[pixel_to_world] Camera transforms created successfully"
+            #@info "[pixel_to_world] Camera transforms created successfully"
         catch e
             @error "[pixel_to_world] Error getting camera transforms: $e"
             # Provide default transforms to continue processing
@@ -479,7 +517,8 @@ function pixel_to_world(localization_state, cam_meas, box)
         end
         
         # Get world to camera transform
-        T_world_camrot = T_world_body * [T_body_camrot; 0 0 0 1]
+        T_body_camrot_h = [T_body_camrot; 0 0 0 1]  # make 4×4
+        T_world_camrot = T_world_body * T_body_camrot_h
         
         # Extract bounding box coordinates
         local top, left, bottom, right
@@ -507,7 +546,7 @@ function pixel_to_world(localization_state, cam_meas, box)
             image_width = cam_meas.image_width
             image_height = cam_meas.image_height
             
-            @info "[pixel_to_world] Camera params: pixel_len=$pixel_len, focal_len=$focal_len, width=$image_width, height=$image_height"
+            #@info "[pixel_to_world] Camera params: pixel_len=$pixel_len, focal_len=$focal_len, width=$image_width, height=$image_height"
             
             # Convert pixel coordinates to camera coordinates
             cam_left = (left - image_width/2) * pixel_len
@@ -515,7 +554,7 @@ function pixel_to_world(localization_state, cam_meas, box)
             cam_top = (top - image_height/2) * pixel_len
             cam_bottom = (bottom - image_height/2) * pixel_len
             
-            @info "[pixel_to_world] Camera coords: left=$cam_left, right=$cam_right, top=$cam_top, bottom=$cam_bottom"
+            #@info "[pixel_to_world] Camera coords: left=$cam_left, right=$cam_right, top=$cam_top, bottom=$cam_bottom"
         catch e
             @error "[pixel_to_world] Error converting to camera coordinates: $e"
             # Use default values
@@ -523,7 +562,8 @@ function pixel_to_world(localization_state, cam_meas, box)
         end
         
         # Assume a fixed depth for objects 
-        depth = 20.0  
+        box_height = abs(bottom - top)
+        depth = max(focal_len * 1.5 / (box_height * pixel_len), 1)
         @info "[pixel_to_world] Using depth: $depth"
         
         # Project to 3D points in camera frame 
@@ -622,9 +662,9 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             detections = ObstacleDetection[]
             
             try
-                @info "[perception] Fetching localization state..."
+                #@info "[perception] Fetching localization state..."
                 latest_localization_state = fetch(localization_state_channel)
-                @info "[perception] Got localization: $(latest_localization_state)"
+                #@info "[perception] Got localization: $(latest_localization_state)"
             
                 for cam_meas in fresh_cam_meas
                     @info "[perception] Processing camera measurement with $(length(cam_meas.bounding_boxes)) boxes"
@@ -657,6 +697,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             # Associate detections with existing tracks
             # This function returns a vector where assignment[i] is the track index for detection i
             assignment = associate_tracks(detections, tracks)
+            assignment = [j > length(tracks) ? 0 : j for j in assignment]
             
             # Debug the assignment to understand its structure
             @info "[perception] Assignment result: $assignment"
@@ -695,13 +736,23 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 else
                     # Create new track for this detection
                     pos = detections[i].position[1:2]
+                    # EKF mean: use detection position, assume zero velocity
+                    x₀ = SVector(pos[1], pos[2], 0.0, 0.0)
+ 
+                    # EKF covariance: moderate confidence in position, high uncertainty in velocity
+                    P₀ = Diagonal([0.5^2, 0.5^2, 5.0^2, 5.0^2])  # variances
                     new_track = TrackedObstacle(
-                        next_track_id, 
-                        SVector(pos[1], pos[2], 0.0, 0.0),  # Initial state: position with zero velocity
-                        Matrix{Float64}(I, 4, 4),  # Initial covariance
-                        current_time, 
-                        detections[i].confidence)
-                    
+                        next_track_id,
+                        x₀,
+                        P₀,
+                        current_time,
+                        0.8
+                    )
+                    # Add logging for visibility
+                    @info "[init] New EKF track $next_track_id"
+                    @info "   μ₀ = $x₀"
+                    @info "   Σ₀ = \n$P₀"
+
                     # Update detection with new track ID
                     detections[i] = ObstacleDetection(
                         detections[i].position, 
@@ -716,7 +767,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             end
 
             # Remove old tracks that haven't been seen recently
-            tracks = [t for t in tracks if current_time - t.last_seen < 1.0]
+            tracks = [t for t in tracks if (current_time - t.last_seen < 2.0) || (t.confidence > 0.3)]
             @info "[perception] After cleanup: $(length(tracks)) active tracks"
 
             # Create perception state with current detections
@@ -734,7 +785,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             end
             put!(perception_state_channel, perception_state)  # Add new state
 
-            @info "[perception] Updated perception state channel"
+            #@info "[perception] Updated perception state channel"
             
             sleep(0.01)  # Short sleep to avoid busy-waiting
         end
@@ -742,6 +793,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
         @error "[perception] CRASHED with error: $e"
         Base.show_backtrace(stderr, catch_backtrace())
     end
+    @info "[perception] Wrote perception with $(length(detections)) obstacles at time $(current_time)"
 end
 
 function decision_making(localization_state_channel, 
@@ -751,19 +803,19 @@ function decision_making(localization_state_channel,
     map, 
     socket)
 # do some setup
-while true
+    while true
 
-    fetch(shutdown_channel) && break
+        fetch(shutdown_channel) && break
 
-    latest_localization_state = fetch(localization_state_channel)
-    latest_perception_state = fetch(perception_state_channel)
+        latest_localization_state = fetch(localization_state_channel)
+        latest_perception_state = fetch(perception_state_channel)
 
-    # figure out what to do .. setup motion planning problem etc
-    steering_angle = 0.0
-    target_vel = 0.0
-    cmd = (steering_angle, target_vel, true)
-    serialize(socket, cmd)
-end
+        # figure out what to do .. setup motion planning problem etc
+        steering_angle = 0.0
+        target_vel = 0.0
+        cmd = (steering_angle, target_vel, true)
+        serialize(socket, cmd)
+    end
 end
 
 function isfull(ch::Channel)
@@ -776,6 +828,25 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     
     msg = deserialize(socket) # Visualization info
     @info msg
+
+    test_point = SVector(3.0, 4.0, 10.0)
+     f = 800.0
+ 
+     f_proj = p -> perspective_projection(p, f)
+     J_analytic = jacobian_projection_analytic(test_point, f)
+     J_numeric = numeric_jacobian(f_proj, test_point)
+ 
+     diff = J_analytic - J_numeric
+     max_diff = maximum(abs.(diff))
+ 
+     @info "[jacobian-test] Analytic Jacobian:\n$J_analytic"
+     @info "[jacobian-test] Numeric Jacobian:\n$J_numeric"
+     @info "[jacobian-test] Difference:\n$diff"
+     if max_diff < 1e-5
+         @info "[jacobian-test] PASSED: max error $max_diff"
+     else
+         @error "[jacobian-test] FAILED: max error $max_diff exceeds tolerance"
+     end
 
     gps_channel = Channel{GPSMeasurement}(32)
     imu_channel = Channel{IMUMeasurement}(32)
@@ -1018,25 +1089,23 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     
     # Perception testing task
     test_task = @async begin
+        last_timestamp = 0.0
+    
         while true
-            @info "TEST PERCEPTION"
-            
-            sleep(1.0)  
-            
+            sleep(1.0)
+    
             fetch(shutdown_channel) && break
-            
-            # Process ground truth data if available (to update eval channel)
+    
+            # --- Update GT Eval Channel ---
             if isready(gt_channel)
                 gt_meas = GroundTruthMeasurement[]
                 while isready(gt_channel)
                     push!(gt_meas, take!(gt_channel))
                 end
-                
-                # Add try-catch to catch potential errors in convert_gt_to_obstacles
+    
                 try
                     gt_detections = shared_convert_gt_to_obstacles(gt_meas)
-                    
-                    # Take existing value if channel is ready to avoid overflow
+    
                     if isready(gt_eval_channel)
                         take!(gt_eval_channel)
                     end
@@ -1045,57 +1114,58 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                     @error "Error converting ground truth measurements in test loop: $e"
                 end
             end
-
-            # Perception evaluation
+    
+            # --- Perception Evaluation ---
             try
-                # Get and display perception state
-                if isready(perception_state_channel)
-                    # Create a copy of the perception state to avoid any race conditions
-                    local perception
-                    try
-                        perception = fetch(perception_state_channel)
-                        
-                        @info "Fetched perception with $(length(perception.obstacles)) obstacles"
-                    catch e
-                        @error "Error fetching perception state: $e"
-                        continue
+                new_perception = nothing
+    
+                # Wait for a perception state with a newer timestamp
+                while true
+                    if isready(perception_state_channel)
+                        maybe_new = fetch(perception_state_channel)
+                        if maybe_new.timestamp > last_timestamp
+                            new_perception = maybe_new
+                            last_timestamp = new_perception.timestamp
+                            break
+                        end
                     end
-                    
-                    # Get and display ground truth state for comparison
+                    sleep(0.01)
+                    fetch(shutdown_channel) && break
+                end
+    
+                if new_perception !== nothing
+                    @info "[test] Read NEW perception state with timestamp $(new_perception.timestamp) and $(length(new_perception.obstacles)) obstacles"
+    
+                    # --- Compare to ground truth ---
                     if isready(gt_eval_channel)
-                        local gt
                         try
                             gt = fetch(gt_eval_channel)
-                            est = perception.obstacles
-
+                            est = new_perception.obstacles
+    
                             @info "Comparing perception to ground truth:"
                             @info "   # Perceived: $(length(est)), # GT: $(length(gt))"
-                            
+    
                             if !isempty(est) && !isempty(gt)
-                                try
-                                    dists = Float64[]
-                                    for e in est
-                                        e_dists = [norm(e.position - g.position) for g in gt]
-                                        if !isempty(e_dists)
-                                            push!(dists, minimum(e_dists))
-                                        end
+                                dists = Float64[]
+                                for e in est
+                                    e_dists = [norm(e.position - g.position) for g in gt]
+                                    if !isempty(e_dists)
+                                        push!(dists, minimum(e_dists))
                                     end
-                                    
-                                    if !isempty(dists)
-                                        avg_error = sum(dists) / length(dists)
-                                        @info "   Avg nearest neighbor error: $(round(avg_error, digits=2)) meters"
-                                    end
-                                catch e
-                                    @error "Error calculating distances: $e"
+                                end
+    
+                                if !isempty(dists)
+                                    avg_error = sum(dists) / length(dists)
+                                    @info "   Avg nearest neighbor error: $(round(avg_error, digits=2)) meters"
                                 end
                             end
                         catch e
-                            @error "Error processing ground truth data: $e" 
+                            @error "Error comparing to ground truth: $e"
                         end
                     end
                 end
             catch e
-                @error "Error in perception evaluation: $e"
+                @error "Error in perception test loop: $e"
             end
         end
     end
