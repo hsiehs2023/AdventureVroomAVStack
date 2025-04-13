@@ -306,7 +306,8 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
-    target_segment = 80
+    target_segment = 80 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
+    # target_segment = fetch(target_segment_channel)
     # while !isready(target_segment_channel)
     #     fetch(shutdown_channel) && break
     #     sleep(0.001)
@@ -316,7 +317,6 @@ function decision_making(localization_state_channel,
     #     meas = take!(target_segment_channel)
     #     target_segment = meas
     # end
-    println(target_segment)
 
     path = routing(gt_channel, target_segment, map) #this will be the list of segments returned by routing function
     polyline = [] #polyline we create
@@ -326,7 +326,6 @@ function decision_making(localization_state_channel,
     end
     pt = compute_midpoint_target(path[end])
     push!(polyline, pt)
-    println(polyline)
 
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
@@ -339,10 +338,9 @@ function decision_making(localization_state_channel,
     stop_start_time = 0.0
     required_stop_time = 3.0  # seconds to wait at stop sign
     while true
-        fetch(shutdown_channel) && break
+        fetch(shutdown_channel) && return
 
         t = -1.0
-        
         latest_localization_state = fetch(localization_state_channel)
         #latest_perception_state = fetch(perception_state_channel)
         c1 = latest_localization_state.position[1]
@@ -354,26 +352,43 @@ function decision_making(localization_state_channel,
 
         # lookahead_radius = v * ls
         lookahead_radius = 10.0
+        increase_lookahead_step = 1.0
+        furthest_view = 20.0
         current_segment = polyline[current_segment_index]
 
         p1 = current_segment[1]
         p2 = current_segment[2]
         a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
         b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
-        c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
+        q = nothing
 
-        discriminant = b^2 - 4 * a * c
-        center = SVector(c1, c2)
+        while true
+            fetch(shutdown_channel) && return
+            
+            c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
-        if discriminant >= 0
-            sqrt_disc = sqrt(discriminant)
-            t_upper = (-b + sqrt_disc) / (2 * a)
-            t_lower = (-b - sqrt_disc) / (2 * a)
-            valid_t = filter(t -> -0.05 ≤ t ≤ 1.1, [t_upper, t_lower])
-            t = isempty(valid_t) ? -1 : first(valid_t)
-            q = SVector((t * (p2 - p1) + p1)) - center
-        else 
-            q = center
+            discriminant = b^2 - 4 * a * c
+            center = SVector(c1, c2)
+
+            if discriminant >= 0
+                sqrt_disc = sqrt(discriminant)
+                t_upper = (-b + sqrt_disc) / (2 * a)
+                t_lower = (-b - sqrt_disc) / (2 * a)
+                valid_t = filter(t -> -0.05 ≤ t , [t_upper, t_lower])
+                t = isempty(valid_t) ? -5 : first(valid_t)
+                q = SVector((t * (p2 - p1) + p1)) - center
+            else 
+                q = center
+            end
+
+            if lookahead_radius >= furthest_view
+                lookahead_radius = 10.0
+            elseif t == -1 || t == -5
+                lookahead_radius += increase_lookahead_step
+            else
+                break
+            end
+        # TODO: make the above a do-while loop and keep increasing the lookahead radius until we find smth
         end
 
         heading = [cos(θ); sin(θ)]
@@ -441,7 +456,7 @@ function decision_making(localization_state_channel,
         # speed = v > 6 ? -1.0 : 1.0
         # cmd = (steering_angle, 3.0*speed, true)
 
-        if 0.9 ≤ t ≤ 1.1    
+        if 0.9 ≤ t     
             current_segment_index += 1
         end
 
