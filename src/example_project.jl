@@ -309,22 +309,12 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
-    target_segment = 80 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
-    # target_segment = fetch(target_segment_channel)
-
-    path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
+    target_segment = 0 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
+    path = nothing
     polyline = [] #polyline we create
-    for i in 1:length(path)-1
-        pt = compute_midpoints(path[i])
-        push!(polyline, pt)
-    end
-    pt = compute_midpoint_target(path[end])
-    push!(polyline, pt)
-
-    #now we can do PID controller on polyline
-    alpha = [0.0, 0.0]
+    pt = nothing
+    alpha = nothing
     current_segment_index = 1
-    println(polyline)
 
     # --- State tracking for stop sign ---
     at_stop_sign = false
@@ -333,6 +323,23 @@ function decision_making(localization_state_channel,
     required_stop_time = 10.0  # seconds to wait at stop sign
     while true
         fetch(shutdown_channel) && return
+        old_target_segment = target_segment
+        target_segment = fetch(target_segment_channel)
+        println(target_segment)
+        if old_target_segment != target_segment
+            path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
+            for i in 1:length(path)-1
+                pt = compute_midpoints(path[i])
+                push!(polyline, pt)
+            end
+            pt = compute_midpoint_target(path[end])
+            push!(polyline, pt)
+        
+            #now we can do PID controller on polyline
+            alpha = [0.0, 0.0]
+            current_segment_index = 1
+            println(polyline)
+        end
 
         t = -1.0
         latest_localization_state = fetch(localization_state_channel)
@@ -355,11 +362,9 @@ function decision_making(localization_state_channel,
         a = (p2[1] - p1[1])^2 + (p2[2] - p1[2])^2
         b = 2 * ((p2[1] - p1[1]) * (p1[1] - c1) + (p2[2] - p1[2]) * (p1[2] - c2))
         q = nothing
-        println("Here4")
 
         while true
             fetch(shutdown_channel) && return
-            println("HERE 5")
             
             c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
@@ -413,17 +418,14 @@ function decision_making(localization_state_channel,
             
         current_time = time()
         lanes = path[current_segment_index].lane_types
-        println("Before if")
 
         # if :stop_sign in lanes
     try
         if VehicleSim.stop_sign in lanes
-            println("first level")
             if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
                 cmd = (steering_angle, target_speed, true)
-                println("still decel")
 
             #     if target_speed < 0.1
             #         at_stop_sign = true
@@ -456,7 +458,6 @@ function decision_making(localization_state_channel,
                 cmd = (steering_angle, target_vel, true)
             end
         else
-            println("Not stop sign")
             # Regular driving
             speed = v > 6 ? -1.0 : 1.0
             cmd = (steering_angle, target_vel * speed, true)
@@ -466,14 +467,24 @@ function decision_making(localization_state_channel,
         return nothing
     end
 
-        if 0.9 ≤ t 
+        if 0.9 ≤ t && current_segment_index <= length(polyline)
             current_segment_index += 1
+        elseif current_segment_index > length(polyline)
+            cmd = (steering_angle, 0.0, true)
         end
-        println("here2")
         serialize(socket, cmd)
-        println("Here3")
     end
 
+end
+
+function test_target_change(target_segment_channel, shutdown_channel)
+    while true
+        fetch(shutdown_channel) && return
+        @info "Spinning"
+        sleep(3.0)
+        take!(target_segment_channel)
+        put!(target_segment_channel, 40)
+    end
 end
 
 function isfull(ch::Channel)
@@ -549,6 +560,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
     #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
     push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
+    # push!(tasks, @async test_target_change(target_segment_channel, shutdown_channel))
 
     for t in tasks
         wait(t)
