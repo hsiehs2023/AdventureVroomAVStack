@@ -287,6 +287,8 @@ function decision_making(localization_state_channel,
     socket, gt_channel)
     # do some setup
     println("In decision")
+    sleep(0.5)
+    try
     # --- begin motion planning ---
     # function to compute midpoints for a one lane road segment
     function compute_midpoints(segment)
@@ -309,7 +311,7 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
-    target_segment = 0 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
+    target_segment = -1 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
     path = nothing
     polyline = [] #polyline we create
     pt = nothing
@@ -325,8 +327,8 @@ function decision_making(localization_state_channel,
         fetch(shutdown_channel) && return
         old_target_segment = target_segment
         target_segment = fetch(target_segment_channel)
-        println(target_segment)
         if old_target_segment != target_segment
+            @info "Getting new route"
             path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
             for i in 1:length(path)-1
                 pt = compute_midpoints(path[i])
@@ -334,6 +336,7 @@ function decision_making(localization_state_channel,
             end
             pt = compute_midpoint_target(path[end])
             push!(polyline, pt)
+            # println("Here")
         
             #now we can do PID controller on polyline
             alpha = [0.0, 0.0]
@@ -401,7 +404,6 @@ function decision_making(localization_state_channel,
         alpha *= sign(cross_value)
 
         turn = atan((2 * L * sin(alpha)) / lookahead_radius)
-        #println("here")
         result = [turn, 1.0]
         if v > 6
             result = [turn, -1.0]
@@ -420,7 +422,7 @@ function decision_making(localization_state_channel,
         lanes = path[current_segment_index].lane_types
 
         # if :stop_sign in lanes
-    try
+    
         if VehicleSim.stop_sign in lanes
             if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
@@ -462,19 +464,25 @@ function decision_making(localization_state_channel,
             speed = v > 6 ? -1.0 : 1.0
             cmd = (steering_angle, target_vel * speed, true)
         end
-    catch e
-        println("ERROR: $e")
-        return nothing
-    end
+    
 
-        if 0.9 ≤ t && current_segment_index <= length(polyline)
+        if 0.9 ≤ t && current_segment_index < length(polyline)
             current_segment_index += 1
-        elseif current_segment_index > length(polyline)
+            println("Moving to segment ", current_segment_index)
+        elseif current_segment_index >= length(polyline)
+            @info "arrived at target"
             cmd = (steering_angle, 0.0, true)
+            sleep(3.0)
+            current_segment_index = 1
         end
+        # println(cmd)
         serialize(socket, cmd)
     end
-
+catch e
+    println("ERROR: $e")
+    return nothing
+end
+    
 end
 
 function test_target_change(target_segment_channel, shutdown_channel)
