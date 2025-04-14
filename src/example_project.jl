@@ -24,6 +24,7 @@ function routing(localization_state_channel, target_segment_id::Int64, map::Dict
     #pos = current_state.q[5:6]
 
     current_segment_id = find_current_segment(pos, map)
+    println("current_segment_id ", current_segment_id)
 
     #println("Current Segment: ", current_segment_id)
     #println("Target Segment: ", target_segment_id)
@@ -85,6 +86,7 @@ function find_shortest_path(current_segment_id, target_segment_id::Int64, map::D
     end
     push!(path_ids, current_segment_id)
     reverse!(path_ids)
+    println("pathids ", path_ids)
 
     # Return the path as an array of VehicleSim.RoadSegment objects.
     return [map[id] for id in path_ids]
@@ -249,6 +251,7 @@ function find_current_segment(pos, map::Dict{Int, VehicleSim.RoadSegment})
             return seg_id
         end
     end
+    println("UH OHHHH")
 end
 
 ## Ellie Chason - end - ##
@@ -329,6 +332,7 @@ function decision_making(localization_state_channel,
         target_segment = fetch(target_segment_channel)
         if old_target_segment != target_segment
             @info "Getting new route"
+            println(target_segment)
             path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
             for i in 1:length(path)-1
                 pt = compute_midpoints(path[i])
@@ -469,9 +473,10 @@ function decision_making(localization_state_channel,
         if 0.9 ≤ t && current_segment_index < length(polyline)
             current_segment_index += 1
             println("Moving to segment ", current_segment_index)
-        elseif current_segment_index >= length(polyline)
+        elseif 0.5 ≤ t && current_segment_index >= length(polyline)
             @info "arrived at target"
             cmd = (steering_angle, 0.0, true)
+            serialize(socket, cmd)
             sleep(3.0)
             current_segment_index = 1
         end
