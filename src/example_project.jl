@@ -36,6 +36,30 @@ function routing(localization_state_channel, target_segment_id::Int64, map::Dict
     return path
 end
 
+#Performs routing on current segment found from ground truth position (development only)
+function routing(localization_state_channel, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment}, current_segment_id)
+    #Idea 1 for finding current position
+    # gt_meas = fetch(gt_channel)
+    #gt_meas = fetch(localization_state_channel)
+    #pos = gt_meas.position
+    
+    #Idea 2 for finding current position
+    #current_state = fetch(state_channel)
+    #pos = current_state.q[5:6]
+
+    # current_segment_id = find_current_segment(pos, map)
+    # println("current_segment_id ", current_segment_id)
+
+    println("Current Segment: ", current_segment_id)
+    println("Target Segment: ", target_segment_id)
+
+    path = find_shortest_path(current_segment_id, target_segment_id, map)
+
+    #println("Path: ", path)
+
+    return path
+end
+
 function h_imu(x)
     T_body_imu = VehicleSim.get_imu_transform()
     T_imu_body = VehicleSim.invert_transform(T_body_imu)
@@ -314,12 +338,26 @@ function decision_making(localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
-    target_segment = -1 # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
+    target_segment = fetch(target_segment_channel) # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
     path = nothing
     polyline = [] #polyline we create
     pt = nothing
     alpha = nothing
     current_segment_index = 1
+    println(target_segment)
+    path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
+    for i in 1:length(path)-1
+        pt = compute_midpoints(path[i])
+        push!(polyline, pt)
+    end
+    pt = compute_midpoint_target(path[end])
+    push!(polyline, pt)
+    # println("Here")
+
+    #now we can do PID controller on polyline
+    alpha = [0.0, 0.0]
+    current_segment_index = 1
+    println(polyline)
 
     # --- State tracking for stop sign ---
     at_stop_sign = false
@@ -327,26 +365,26 @@ function decision_making(localization_state_channel,
     stop_start_time = 0.0
     required_stop_time = 10.0  # seconds to wait at stop sign
     while true
-        fetch(shutdown_channel) && return
-        old_target_segment = target_segment
-        target_segment = fetch(target_segment_channel)
-        if old_target_segment != target_segment
-            @info "Getting new route"
-            println(target_segment)
-            path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
-            for i in 1:length(path)-1
-                pt = compute_midpoints(path[i])
-                push!(polyline, pt)
-            end
-            pt = compute_midpoint_target(path[end])
-            push!(polyline, pt)
-            # println("Here")
+        # fetch(shutdown_channel) && return
+        # old_target_segment = target_segment
+        # target_segment = fetch(target_segment_channel)
+        # if old_target_segment != target_segment
+        #     @info "Getting new route"
+        #     println(target_segment)
+        #     path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
+        #     for i in 1:length(path)-1
+        #         pt = compute_midpoints(path[i])
+        #         push!(polyline, pt)
+        #     end
+        #     pt = compute_midpoint_target(path[end])
+        #     push!(polyline, pt)
+        #     # println("Here")
         
-            #now we can do PID controller on polyline
-            alpha = [0.0, 0.0]
-            current_segment_index = 1
-            println(polyline)
-        end
+        #     #now we can do PID controller on polyline
+        #     alpha = [0.0, 0.0]
+        #     current_segment_index = 1
+        #     println(polyline)
+        # end
 
         t = -1.0
         latest_localization_state = fetch(localization_state_channel)
@@ -424,41 +462,12 @@ function decision_making(localization_state_channel,
             
         current_time = time()
         lanes = path[current_segment_index].lane_types
-
-        # if :stop_sign in lanes
     
         if VehicleSim.stop_sign in lanes
             if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
                 cmd = (steering_angle, target_speed, true)
-
-            #     if target_speed < 0.1
-            #         at_stop_sign = true
-            #         stop_start_time = current_time
-            #         cmd = (0.0, 0.0, true)
-            #     end
-
-            # elseif at_stop_sign
-            #     println("stopped")
-            #     if !stop_timer_started
-            #         stop_timer_started = true
-            #         stop_start_time = current_time
-            #     end
-
-            #     elapsed = current_time - stop_start_time
-
-            #     if elapsed < required_stop_time
-            #         cmd = (0.0, 0.0, true)
-            #     else
-            #         cmd = (steering_angle, target_vel, true)
-            #         at_stop_sign = false
-            #         stop_timer_started = false
-            #         println("Here")
-            #         # current_segment_index += 1
-            #         # t = -1
-            #     end
-                
 
             else
                 cmd = (steering_angle, target_vel, true)
@@ -470,17 +479,37 @@ function decision_making(localization_state_channel,
         end
     
 
-        if 0.9 ≤ t && current_segment_index < length(polyline)
+        if 0.9 ≤ t && current_segment_index < length(path)
             current_segment_index += 1
             println("Moving to segment ", current_segment_index)
-        elseif 0.5 ≤ t && current_segment_index >= length(polyline)
+        elseif 0.5 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
             sleep(3.0)
+            fetch(shutdown_channel) && return
+            #old_target_segment = target_segment
+            target_segment = fetch(target_segment_channel)
+            #if old_target_segment != target_segment
+                @info "Getting new route"
+                println(target_segment)
+                current_seg = path[current_segment_index].id
+                path = nothing
+                path = routing(localization_state_channel, target_segment, map, current_seg) #this will be the list of segments returned by routing function
+                println(path)
+                polyline = [] #polyline we create
+                pt = nothing
+                for i in 1:length(path)-1
+                    pt = compute_midpoints(path[i])
+                    push!(polyline, pt)
+                end
+            pt = compute_midpoint_target(path[end])
+            push!(polyline, pt)
+            alpha = [0.0, 0.0]
             current_segment_index = 1
+            println(polyline)
+            #end
         end
-        # println(cmd)
         serialize(socket, cmd)
     end
 catch e
