@@ -36,6 +36,17 @@ function routing(localization_state_channel, target_segment_id::Int64, map::Dict
     return path
 end
 
+#Performs routing on current segment found from ground truth position (development only)
+function routing(localization_state_channel, target_segment_id::Int64, map::Dict{Int, VehicleSim.RoadSegment}, current_segment_id)
+
+    println("Current Segment: ", current_segment_id)
+    println("Target Segment: ", target_segment_id)
+
+    path = find_shortest_path(current_segment_id, target_segment_id, map)
+
+    return path
+end
+
 function h_imu(x)
     T_body_imu = VehicleSim.get_imu_transform()
     T_imu_body = VehicleSim.invert_transform(T_body_imu)
