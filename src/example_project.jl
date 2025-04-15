@@ -482,7 +482,7 @@ function pixel_to_world(localization_state, cam_meas, box)
             T_body_camrot = VehicleSim.multiply_transforms(T_body_cam, T_cam_camrot)
             #@info "[pixel_to_world] Camera transforms created successfully"
         catch e
-            @error "[pixel_to_world] Error getting camera transforms: $e"
+            #@error "[pixel_to_world] Error getting camera transforms: $e"
             # Provide default transforms to continue processing
             T_body_cam = [I(3) zeros(3); zeros(1,3) 1]
             T_cam_camrot = [I(3) zeros(3); zeros(1,3) 1]
@@ -492,12 +492,12 @@ function pixel_to_world(localization_state, cam_meas, box)
         # Get world to body transform
         local T_world_body  
         try
-            @info "[pixel_to_world] Creating world transform with orientation: $(localization_state.orientation)"
+            #@info "[pixel_to_world] Creating world transform with orientation: $(localization_state.orientation)"
             local R
             if all(isfinite.(localization_state.orientation)) && any(localization_state.orientation .!= 0)
                 R = VehicleSim.Rot_from_quat(localization_state.orientation)
             else
-                @warn "[pixel_to_world] Using identity rotation matrix due to invalid quaternion"
+                #@warn "[pixel_to_world] Using identity rotation matrix due to invalid quaternion"
                 R = Matrix{Float64}(I, 3, 3)
             end
             
@@ -505,14 +505,14 @@ function pixel_to_world(localization_state, cam_meas, box)
             if all(isfinite.(localization_state.position)) 
                 pos = localization_state.position
             else
-                @warn "[pixel_to_world] Using zero position due to invalid position"
+                #@warn "[pixel_to_world] Using zero position due to invalid position"
                 pos = SVector{3, Float64}(0.0, 0.0, 0.0)
             end
             
             T_world_body = [R pos; 0 0 0 1]
-            @info "[pixel_to_world] World transform created successfully"
+            #@info "[pixel_to_world] World transform created successfully"
         catch e
-            @error "[pixel_to_world] Error creating world transform: $e"
+            #@error "[pixel_to_world] Error creating world transform: $e"
             T_world_body = [I(3) zeros(3); zeros(1,3) 1]
         end
         
@@ -524,9 +524,9 @@ function pixel_to_world(localization_state, cam_meas, box)
         local top, left, bottom, right
         try
             top, left, bottom, right = box
-            @info "[pixel_to_world] Extracted box coordinates: top=$top, left=$left, bottom=$bottom, right=$right"
+            #@info "[pixel_to_world] Extracted box coordinates: top=$top, left=$left, bottom=$bottom, right=$right"
         catch e
-            @error "[pixel_to_world] Error extracting box coordinates: $e"
+            #@error "[pixel_to_world] Error extracting box coordinates: $e"
             # Use default values
             top, left, bottom, right = 0.0, 0.0, 100.0, 100.0
         end
@@ -556,7 +556,7 @@ function pixel_to_world(localization_state, cam_meas, box)
             
             #@info "[pixel_to_world] Camera coords: left=$cam_left, right=$cam_right, top=$cam_top, bottom=$cam_bottom"
         catch e
-            @error "[pixel_to_world] Error converting to camera coordinates: $e"
+            #@error "[pixel_to_world] Error converting to camera coordinates: $e"
             # Use default values
             cam_left, cam_right, cam_top, cam_bottom = -1.0, 1.0, -1.0, 1.0
         end
@@ -564,7 +564,7 @@ function pixel_to_world(localization_state, cam_meas, box)
         # Assume a fixed depth for objects 
         box_height = abs(bottom - top)
         depth = max(focal_len * 1.5 / (box_height * pixel_len), 1)
-        @info "[pixel_to_world] Using depth: $depth"
+        #@info "[pixel_to_world] Using depth: $depth"
         
         # Project to 3D points in camera frame 
         try
@@ -573,12 +573,12 @@ function pixel_to_world(localization_state, cam_meas, box)
             
             # Center of the bounding box
             p_center = (p1 + p2) / 2
-            @info "[pixel_to_world] 3D camera point: $p_center"
+            #@info "[pixel_to_world] 3D camera point: $p_center"
             
             # Convert to world coordinates
             p_center_homogeneous = T_world_camrot * [p_center; 1]
             p_world = SVector{3, Float64}(p_center_homogeneous[1:3])
-            @info "[pixel_to_world] 3D world point: $p_world"
+            #@info "[pixel_to_world] 3D world point: $p_world"
             
             # Calculate approximate size
             width = abs(cam_right - cam_left) * depth / focal_len
@@ -586,16 +586,16 @@ function pixel_to_world(localization_state, cam_meas, box)
             
             # Assume rectangular object with some depth
             size = SVector{3, Float64}(width, height, (width + height) / 2)
-            @info "[pixel_to_world] Object size: $size"
+            #@info "[pixel_to_world] Object size: $size"
             
             return p_world, size
         catch e
-            @error "[pixel_to_world] Error projecting to 3D: $e"
+            #@error "[pixel_to_world] Error projecting to 3D: $e"
             # Return default values as fallback
             return SVector{3, Float64}(0.0, 0.0, 20.0), SVector{3, Float64}(2.0, 2.0, 2.0)
         end
     catch e
-        @error "[pixel_to_world] Uncaught error in pixel_to_world: $e"
+        #@error "[pixel_to_world] Uncaught error in pixel_to_world: $e"
         Base.show_backtrace(stderr, catch_backtrace())
         # Return default values as fallback
         return SVector{3, Float64}(0.0, 0.0, 20.0), SVector{3, Float64}(2.0, 2.0, 2.0)
@@ -1143,7 +1143,7 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                             est = new_perception.obstacles
     
                             @info "Comparing perception to ground truth:"
-                            @info "   # Perceived: $(length(est)), # GT: $(length(gt))"
+                            @info "   # Perceived: $(length(est)), # GT: $(length(unique(obstacle.id for obstacle in gt)))"
     
                             if !isempty(est) && !isempty(gt)
                                 dists = Float64[]
