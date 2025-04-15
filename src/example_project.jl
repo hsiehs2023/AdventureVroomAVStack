@@ -62,6 +62,67 @@ function ekf_update!(track::TrackedObstacle, z)
     track.P = (I(4) - K * H) * track.P
 end
 
+function cluster_detections(detections::Vector{ObstacleDetection}; threshold=2.0)
+    n = length(detections)
+    if n <= 1
+        return detections
+    end
+    
+    # Create clusters
+    clusters = Vector{Vector{Int}}()
+    assigned = falses(n)
+    
+    for i in 1:n
+        if assigned[i]
+            continue
+        end
+        
+        # Start a new cluster
+        cluster = [i]
+        assigned[i] = true
+        
+        # Find all detections close to this one
+        for j in (i+1):n
+            if assigned[j]
+                continue
+            end
+            
+            if norm(detections[i].position - detections[j].position) < threshold
+                push!(cluster, j)
+                assigned[j] = true
+            end
+        end
+        
+        push!(clusters, cluster)
+    end
+    
+    # Merge detections in each cluster
+    merged_detections = Vector{ObstacleDetection}()
+    for cluster in clusters
+        if length(cluster) == 1
+            push!(merged_detections, detections[cluster[1]])
+        else
+            # Average position, size and velocity
+            avg_pos = sum(detections[i].position for i in cluster) / length(cluster)
+            avg_size = sum(detections[i].size for i in cluster) / length(cluster)
+            avg_vel = sum(detections[i].velocity for i in cluster) / length(cluster)
+            
+            # Take maximum confidence
+            max_conf = maximum(detections[i].confidence for i in cluster)
+            
+            # Use existing ID if any detection has one, otherwise 0
+            ids = [detections[i].id for i in cluster if detections[i].id != 0]
+            id = isempty(ids) ? 0 : first(ids)
+            
+            push!(merged_detections, ObstacleDetection(
+                avg_pos, avg_size, avg_vel, max_conf, id
+            ))
+        end
+    end
+    
+    return merged_detections
+end
+
 function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=5.0)
     n = length(detections)
     m = length(tracks)
@@ -687,6 +748,9 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 Base.show_backtrace(stderr, catch_backtrace())
                 continue  # Skip this iteration if we can't process the measurements
             end
+
+            detections = cluster_detections(detections)
+            @info "[perception] After clustering: $(length(detections)) detections"
 
             # Apply EKF prediction to existing tracks
             for track in tracks
