@@ -482,7 +482,7 @@ function decision_making(localization_state_channel,
         if 0.9 ≤ t && current_segment_index < length(path)
             current_segment_index += 1
             println("Moving to segment ", current_segment_index)
-        elseif 0.5 ≤ t && current_segment_index >= length(path)
+        elseif 0.3 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
