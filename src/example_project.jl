@@ -305,7 +305,7 @@ end
 
 
 
-function decision_making(localization_state_channel, 
+function decision_making(use_gt, localization_state_channel, 
     perception_state_channel, 
     target_segment_channel,
     shutdown_channel,
@@ -384,7 +384,13 @@ function decision_making(localization_state_channel,
         # end
 
         t = -1.0
-        latest_localization_state = fetch(localization_state_channel)
+        if use_gt
+            latest_localization_state = take!(localization_state_channel)
+        else
+            latest_localization_state = fetch(localization_state_channel)
+        end
+
+        # println(latest_localization_state)
         #latest_perception_state = fetch(perception_state_channel)
         c1 = latest_localization_state.position[1]
         c2 = latest_localization_state.position[2]
@@ -463,7 +469,12 @@ function decision_making(localization_state_channel,
             if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
+                println("first 0")
                 cmd = (steering_angle, target_speed, true)
+                at_stop_sign = true
+                serialize(socket, cmd)
+
+                sleep(2.0)
 
             else
                 cmd = (steering_angle, target_vel, true)
@@ -476,9 +487,11 @@ function decision_making(localization_state_channel,
     
         if 0.9 ≤ t && current_segment_index < length(path)
             current_segment_index += 1
+            at_stop_sign = false
             println("Moving to segment ", current_segment_index)
         elseif 0.2 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
+            println("second zero")
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
             sleep(3.0)
@@ -505,6 +518,7 @@ function decision_making(localization_state_channel,
             println(polyline)
             #end
         end
+        println(cmd)
         
         serialize(socket, cmd)
     end
@@ -530,7 +544,7 @@ function isfull(ch::Channel)
 end
 
 
-function my_client(host::IPAddr=IPv4(0), port=4444)
+function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
     socket = Sockets.connect(host, port)
     map_segments = VehicleSim.city_map()
     
@@ -594,9 +608,16 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
 
     tasks = []
     push!(tasks, error_mon)
-    push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
+    if use_gt
+        @info "Using gt measurements"
+        push!(tasks, @async decision_making(true, gt_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
+
+    else
+        @info "Using sensor measurements"
+        push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
+        push!(tasks, @async decision_making(false, localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
+    end
     #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
-    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
     # push!(tasks, @async test_target_change(target_segment_channel, shutdown_channel))
 
