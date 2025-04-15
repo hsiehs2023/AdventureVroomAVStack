@@ -145,6 +145,7 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
     x_prev = zeros(13)
     zs = Vector{Float64}[]
+    time_counter = 0
 
     while true
         fetch(shutdown_channel) && break
@@ -243,6 +244,17 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             println("   estimated linear: ", μ[8:10])
             println("   GT angular: ", fresh_gt_meas[end].angular_velocity)
             println("   estimated angular: ", μ[11:13])
+
+        end
+
+        if false #For testing error
+            error = μ[1:3] - fresh_gt_meas[end].position
+            println(error)
+            # Append to a CSV file
+            open("errors.csv", "a") do io
+                writedlm(io, [time_counter error'], ',')  # Transpose error to make it 1 row
+            end
+            time_counter += 1
 
         end
 
@@ -352,12 +364,10 @@ function decision_making(localization_state_channel,
     end
     pt = compute_midpoint_target(path[end])
     push!(polyline, pt)
-    # println("Here")
 
     #now we can do PID controller on polyline
     alpha = [0.0, 0.0]
     current_segment_index = 1
-    println(polyline)
 
     # --- State tracking for stop sign ---
     at_stop_sign = false
@@ -410,7 +420,6 @@ function decision_making(localization_state_channel,
 
         while true
             fetch(shutdown_channel) && return
-            
             c = (p1[1] - c1)^2 + (p1[2] - c2)^2 - lookahead_radius^2 
 
             discriminant = b^2 - 4 * a * c
@@ -478,11 +487,10 @@ function decision_making(localization_state_channel,
             cmd = (steering_angle, target_vel * speed, true)
         end
     
-
         if 0.9 ≤ t && current_segment_index < length(path)
             current_segment_index += 1
             println("Moving to segment ", current_segment_index)
-        elseif 0.3 ≤ t && current_segment_index >= length(path)
+        elseif 0.2 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
@@ -510,6 +518,7 @@ function decision_making(localization_state_channel,
             println(polyline)
             #end
         end
+        
         serialize(socket, cmd)
     end
 catch e
