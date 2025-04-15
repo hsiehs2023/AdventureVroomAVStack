@@ -1017,7 +1017,8 @@ function decision_making(use_gt, localization_state_channel,
         end
 
         # println(latest_localization_state)
-        #latest_perception_state = fetch(perception_state_channel)
+        latest_perception_state = fetch(perception_state_channel)
+        println(latest_perception_state)
         c1 = latest_localization_state.position[1]
         c2 = latest_localization_state.position[2]
         θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state.orientation)
