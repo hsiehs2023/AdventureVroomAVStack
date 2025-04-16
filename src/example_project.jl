@@ -117,7 +117,7 @@ function Jac_h_imu(x)
 end
   
 
-function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
+function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel=nothing)
     # Set up algorithm / initialize variables
     # process measurements
     proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
@@ -159,16 +159,16 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             push!(fresh_imu_meas, meas)
         end
 
-        fresh_gt_meas = []
-        while !isready(gt_channel)
-            fetch(shutdown_channel) && break
-            sleep(0.001)
-        end
-        while isready(gt_channel)
-            fetch(shutdown_channel) && break
-            meas = take!(gt_channel)
-            push!(fresh_gt_meas, meas)
-        end
+        # fresh_gt_meas = []
+        # while !isready(gt_channel)
+        #     fetch(shutdown_channel) && break
+        #     sleep(0.001)
+        # end
+        # while isready(gt_channel)
+        #     fetch(shutdown_channel) && break
+        #     meas = take!(gt_channel)
+        #     push!(fresh_gt_meas, meas)
+        # end
 
         # Dynamically calculate the time step Δ
         current_timestamp = time()
@@ -310,7 +310,7 @@ function decision_making(localization_state_channel,
     target_segment_channel,
     shutdown_channel,
     map, 
-    socket, gt_channel)
+    socket, gt_channel=nothing)
     # do some setup
     println("In decision")
     sleep(0.5)
@@ -594,9 +594,9 @@ function my_client(host::IPAddr=IPv4(0), port=4444)
 
     tasks = []
     push!(tasks, error_mon)
-    push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel))
+    push!(tasks, @async localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel))
     #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
-    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket, gt_channel))
+    push!(tasks, @async decision_making(localization_state_channel, perception_state_channel, target_segment_channel, shutdown_channel, map_segments, socket))
     push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
     # push!(tasks, @async test_target_change(target_segment_channel, shutdown_channel))
 
