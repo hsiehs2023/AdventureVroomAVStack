@@ -675,8 +675,9 @@ function pixel_to_world(localization_state, cam_meas, box)
         
         # Assume a fixed depth for objects 
         box_height = abs(bottom - top)
-        depth = max(focal_len * 1.5 / (box_height * pixel_len), 1)
-        #@info "[pixel_to_world] Using depth: $depth"
+        
+        depth = max(focal_len * 8.0 / (box_height * pixel_len), 10.0)
+        #@info "[pixel_to_world] Estimated depth: $depth meters for box height: $box_height pixels"
         
         # Project to 3D points in camera frame 
         try
@@ -766,6 +767,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
     @info "[perception] Running perception loop"
     tracks = TrackedObstacle[]
     next_track_id = 1
+    last_positions = Dict{Int, Tuple{SVector{3, Float64}, Float64}}() # id -> (position, timestamp)
     
     try
         while true
@@ -793,21 +795,22 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             detections = ObstacleDetection[]
             
             try
-                #@info "[perception] Fetching localization state..."
                 latest_localization_state = fetch(localization_state_channel)
-                #@info "[perception] Got localization: $(latest_localization_state)"
-            
+                
                 for cam_meas in fresh_cam_meas
                     @info "[perception] Processing camera measurement with $(length(cam_meas.bounding_boxes)) boxes"
                     for box in cam_meas.bounding_boxes
-                        @info "[perception] Processing box: $box"
                         try
                             pos, size = pixel_to_world(latest_localization_state, cam_meas, box)
-                            @info "[perception] Computed world position: $pos, size: $size"
-                            push!(detections, ObstacleDetection(pos, size, SVector(0.0, 0.0), 0.8, 0))
+                            
+                            # Default velocity is zero
+                            velocity = SVector{2, Float64}(0.0, 0.0)
+                            
+                            # Create detection with reasonable confidence
+                            push!(detections, ObstacleDetection(pos, size, velocity, 0.8, 0))
                         catch e
                             @error "[perception] Failed to process box: $e"
-                            Base.show_backtrace(stderr, catch_backtrace())
+                            
                         end
                     end
                 end
@@ -815,119 +818,104 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 @info "[perception] Created $(length(detections)) initial obstacle detections"
             catch e
                 @error "[perception] Failed to process camera measurements: $e"
-                Base.show_backtrace(stderr, catch_backtrace())
                 continue  # Skip this iteration if we can't process the measurements
             end
 
-            detections = cluster_detections(detections)
-            @info "[perception] After clustering: $(length(detections)) detections"
+            # Only proceed with clustering if we have detections
+            if !isempty(detections)
+                detections = cluster_detections(detections)
+                @info "[perception] After clustering: $(length(detections)) detections"
 
-            # Apply EKF prediction to existing tracks
-            for track in tracks
-                dt = current_time - track.last_seen
-                ekf_predict!(track, dt)
-            end
-
-            # Associate detections with existing tracks
-            # This function returns a vector where assignment[i] is the track index for detection i
-            assignment = associate_tracks(detections, tracks)
-            assignment = [j > length(tracks) ? 0 : j for j in assignment]
-            
-            # Debug the assignment to understand its structure
-            @info "[perception] Assignment result: $assignment"
-            
-            # Count non-zero assignments to report how many are matched with existing tracks
-            num_matched = count(x -> x != 0, assignment)
-            @info "[perception] Associated $num_matched detections with existing tracks"
-
-            assigned_tracks = Set{Int}()
-            
-            # Process each detection - either update existing track or create new one
-            for i in 1:length(detections)
-                # Get the assigned track index for this detection
-                if i <= length(assignment)
-                    track_idx = assignment[i]
-                else
-                    @warn "[perception] No assignment for detection $i"
-                    track_idx = 0  # Default to creating a new track
+                # Apply EKF prediction to existing tracks
+                for track in tracks
+                    dt = current_time - track.last_seen
+                    ekf_predict!(track, dt)
                 end
+
+                # Associate detections with existing tracks
+                assignment = associate_tracks(detections, tracks)
+                @info "[perception] Assignment result: $assignment"
                 
-                # Check if the track index is valid and the track exists
-                if track_idx != 0 && track_idx <= length(tracks)
-                    # Update existing track with this detection
-                    ekf_update!(tracks[track_idx], detections[i].position[1:2])
-                    tracks[track_idx].last_seen = current_time
-                    tracks[track_idx].confidence = max(tracks[track_idx].confidence, detections[i].confidence)
-                    push!(assigned_tracks, track_idx)
+                # Process each detection
+                assigned_tracks = Set{Int}()
+                
+                for i in 1:length(detections)
+                    track_idx = i <= length(assignment) ? assignment[i] : 0
                     
-                    # Update detection with track info
-                    detections[i] = ObstacleDetection(
-                        detections[i].position, 
-                        detections[i].size, 
-                        tracks[track_idx].x[3:4],  # Use velocity from track
-                        tracks[track_idx].confidence, 
-                        tracks[track_idx].id)
-                else
-                    # Create new track for this detection
-                    pos = detections[i].position[1:2]
-                    # EKF mean: use detection position, assume zero velocity
-                    x₀ = SVector(pos[1], pos[2], 0.0, 0.0)
- 
-                    # EKF covariance: moderate confidence in position, high uncertainty in velocity
-                    P₀ = Diagonal([0.5^2, 0.5^2, 5.0^2, 5.0^2])  # variances
-                    new_track = TrackedObstacle(
-                        next_track_id,
-                        x₀,
-                        P₀,
-                        current_time,
-                        0.8
-                    )
-                    # Add logging for visibility
-                    @info "[init] New EKF track $next_track_id"
-                    @info "   μ₀ = $x₀"
-                    @info "   Σ₀ = \n$P₀"
-
-                    # Update detection with new track ID
-                    detections[i] = ObstacleDetection(
-                        detections[i].position, 
-                        detections[i].size, 
-                        SVector(0.0, 0.0),  # New track has no velocity estimate yet
-                        detections[i].confidence, 
-                        next_track_id)
-                    
-                    push!(tracks, new_track)
-                    next_track_id += 1
+                    if track_idx != 0 && track_idx <= length(tracks)
+                        # Update existing track with this detection
+                        ekf_update!(tracks[track_idx], detections[i].position[1:2])
+                        tracks[track_idx].last_seen = current_time
+                        tracks[track_idx].confidence = max(tracks[track_idx].confidence, detections[i].confidence)
+                        push!(assigned_tracks, track_idx)
+                        
+                        # Calculate velocity from EKF state
+                        velocity = tracks[track_idx].x[3:4]
+                        
+                        # Update detection with track info
+                        detections[i] = ObstacleDetection(
+                            detections[i].position, 
+                            detections[i].size, 
+                            velocity,  
+                            tracks[track_idx].confidence, 
+                            tracks[track_idx].id)
+                            
+                        # Store position and time for velocity calculation
+                        last_positions[tracks[track_idx].id] = (detections[i].position, current_time)
+                    else
+                        # Create new track
+                        pos = detections[i].position[1:2]
+                        x₀ = SVector{4, Float64}(pos[1], pos[2], 0.0, 0.0)
+                        P₀ = Diagonal([0.5^2, 0.5^2, 5.0^2, 5.0^2])
+                        
+                        new_track = TrackedObstacle(
+                            next_track_id,
+                            x₀,
+                            P₀,
+                            current_time,
+                            0.8
+                        )
+                        
+                        # Update detection with new track ID
+                        detections[i] = ObstacleDetection(
+                            detections[i].position, 
+                            detections[i].size, 
+                            SVector{2, Float64}(0.0, 0.0),
+                            detections[i].confidence, 
+                            next_track_id)
+                        
+                        # Store position for future velocity calculation
+                        last_positions[next_track_id] = (detections[i].position, current_time)
+                        
+                        push!(tracks, new_track)
+                        next_track_id += 1
+                    end
                 end
-            end
 
-            # Remove old tracks that haven't been seen recently
-            tracks = [t for t in tracks if (current_time - t.last_seen < 2.0) || (t.confidence > 0.3)]
-            @info "[perception] After cleanup: $(length(tracks)) active tracks"
+                # Remove old tracks that haven't been seen recently
+                tracks = [t for t in tracks if (current_time - t.last_seen < 2.0) || (t.confidence > 0.3)]
+                @info "[perception] After cleanup: $(length(tracks)) active tracks"
+            end
 
             # Create perception state with current detections
             perception_state = MyPerceptionType(
                 current_time,
-                detections,  # These now have track IDs and velocities where available
-                Vector{LaneMarking}()  # No lane markings for now
+                detections,
+                Vector{LaneMarking}()
             )
 
-            @info "[perception] Created perception state with $(length(detections)) detections"
-
-            # Update perception channel with new state
+            # Update perception channel
             if isready(perception_state_channel)
-                take!(perception_state_channel)  # Remove old state
+                take!(perception_state_channel)
             end
-            put!(perception_state_channel, perception_state)  # Add new state
-
-            #@info "[perception] Updated perception state channel"
+            put!(perception_state_channel, perception_state)
             
-            sleep(0.01)  # Short sleep to avoid busy-waiting
+            sleep(0.01)
         end
     catch e
         @error "[perception] CRASHED with error: $e"
         Base.show_backtrace(stderr, catch_backtrace())
     end
-    @info "[perception] Wrote perception with $(length(detections)) obstacles at time $(current_time)"
 end
 
 
@@ -963,6 +951,54 @@ function decision_making(use_gt, localization_state_channel,
         [a_mid, b_mid] #2X2 matrix
     end
 
+    # ----- obstacle detection functions -----
+    function is_obstacle_ahead(obstacles, ego_pos, ego_heading, lookahead_distance, path_width=3.5)
+        closest_obstacle_distance = Inf
+        obstacle_found = false
+        
+        for obstacle in obstacles
+            # Skip invalid obstacles
+            if !all(isfinite.(obstacle.position))
+                continue
+            end
+            
+            # Get 2D positions
+            obs_pos_2d = SVector(obstacle.position[1], obstacle.position[2])
+            ego_pos_2d = SVector(ego_pos[1], ego_pos[2])
+            
+            # Vector from ego to obstacle
+            relative_pos = obs_pos_2d - ego_pos_2d
+            distance = norm(relative_pos)
+            
+            # Project onto heading direction
+            projection = dot(relative_pos, ego_heading)
+            
+            # Only consider obstacles ahead of us and within a reasonable distance
+            # Add minimum distance threshold to ignore very close detections (likely false positives)
+            if 8.0 < projection < lookahead_distance
+                # Calculate lateral distance from our path
+                lateral_vector = relative_pos - projection * ego_heading
+                lateral_dist = norm(lateral_vector)
+                
+                # If obstacle is within our path width, it's ahead of us
+                if lateral_dist < path_width && distance < closest_obstacle_distance
+                    # Add confidence threshold to filter out low-confidence detections
+                    # (assuming obstacles have a confidence field)
+                    if hasfield(typeof(obstacle), :confidence) && obstacle.confidence < 0.6
+                        continue
+                    end
+                    
+                    obstacle_found = true
+                    closest_obstacle_distance = distance
+                    @info "[obstacle_detection] Obstacle ahead at distance $distance, lateral offset $lateral_dist"
+                end
+            end
+        end
+        
+        return obstacle_found, closest_obstacle_distance
+    end
+    # ----- end obstacle detection functions -----
+
     target_segment = fetch(target_segment_channel) # Good testing target ids are 80 (road above the origin) and 27 (road we start on)
     path = nothing
     polyline = [] #polyline we create
@@ -987,28 +1023,17 @@ function decision_making(use_gt, localization_state_channel,
     stop_timer_started = false
     stop_start_time = 0.0
     required_stop_time = 10.0  # seconds to wait at stop sign
+    
+    # --- Obstacle tracking ---
+    obstacle_detected = false
+    obstacle_distance = Inf
+    
+    # --- Obstacle avoidance parameters ---
+    stop_distance = 20.0        # Stop completely at this distance 
+    caution_distance = 80.0     # Start slowing down at this distance 
+    detection_distance = 100.0  # Maximum detection range 
+    
     while true
-        # fetch(shutdown_channel) && return
-        # old_target_segment = target_segment
-        # target_segment = fetch(target_segment_channel)
-        # if old_target_segment != target_segment
-        #     @info "Getting new route"
-        #     println(target_segment)
-        #     path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
-        #     for i in 1:length(path)-1
-        #         pt = compute_midpoints(path[i])
-        #         push!(polyline, pt)
-        #     end
-        #     pt = compute_midpoint_target(path[end])
-        #     push!(polyline, pt)
-        #     # println("Here")
-        
-        #     #now we can do PID controller on polyline
-        #     alpha = [0.0, 0.0]
-        #     current_segment_index = 1
-        #     println(polyline)
-        # end
-
         t = -1.0
         if use_gt
             latest_localization_state = take!(localization_state_channel)
@@ -1016,17 +1041,46 @@ function decision_making(use_gt, localization_state_channel,
             latest_localization_state = fetch(localization_state_channel)
         end
 
-        # println(latest_localization_state)
+        # Get latest perception state with obstacles
         latest_perception_state = fetch(perception_state_channel)
-        println(latest_perception_state)
+        current_time = time()
+        
+        @info "[decision] Perception state has $(length(latest_perception_state.obstacles)) obstacles"
+        if !isempty(latest_perception_state.obstacles)
+            for (i, obs) in enumerate(latest_perception_state.obstacles)
+                @info "[decision] Obstacle $i: pos=$(obs.position), vel=$(obs.velocity)"
+            end
+        end
+        
+        # Extract ego vehicle state
         c1 = latest_localization_state.position[1]
         c2 = latest_localization_state.position[2]
+        ego_pos = SVector(c1, c2)
         θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state.orientation)
+        ego_heading = SVector(cos(θ), sin(θ))
         v = norm(latest_localization_state.velocity)
+        
+        # Check for obstacles ahead with increased detection distance
+        if !isempty(latest_perception_state.obstacles)
+            obstacle_ahead, distance = is_obstacle_ahead(
+                latest_perception_state.obstacles,
+                ego_pos,
+                ego_heading,
+                detection_distance,  
+                4.0                  
+            )
+            
+            obstacle_detected = obstacle_ahead
+            obstacle_distance = distance
+        else
+            obstacle_detected = false
+            obstacle_distance = Inf
+        end
+        
+        # Pure Pursuit
         ls = 0.1 #lookahead time
-        L=13
+        L = 13
 
-        # lookahead_radius = v * ls
         lookahead_radius = 10.0
         increase_lookahead_step = 1.0
         furthest_view = 20.0
@@ -1063,7 +1117,6 @@ function decision_making(use_gt, localization_state_channel,
             else
                 break
             end
-        # TODO: make the above a do-while loop and keep increasing the lookahead radius until we find smth
         end
 
         heading = [cos(θ); sin(θ)]
@@ -1074,79 +1127,91 @@ function decision_making(use_gt, localization_state_channel,
         cross_value = heading[1] * q[2] - heading[2] * q[1]  # 2D cross product determinant
         alpha *= sign(cross_value)
 
-        turn = atan((2 * L * sin(alpha)) / lookahead_radius)
-        result = [turn, 1.0]
-        if v > 6
-            result = [turn, -1.0]
-        end
-
-        # figure out what to do ... setup motion planning problem etc
-        steering_angle = turn
-        # if path[current_segment_index].lane_types == stop_sign
-        target_vel = 5
-        cmd = (steering_angle, target_vel, true)
-
-        # index of our current segment in the polyline should be the same as the index in path for the corresponding segment in the map
-        # we can change this to include OR if perception takes in another vehicle in line of sight
+        # Calculate base steering angle using Pure Pursuit
+        base_steering = atan((2 * L * sin(alpha)) / lookahead_radius)
+        
+        # Set default command values
+        steering_angle = base_steering
+        target_vel = 5.0
+        
+        # Handle obstacles 
+        if obstacle_detected
             
-        current_time = time()
+            if obstacle_distance < stop_distance
+                # Full stop 
+                target_vel = 0.0
+                @info "[obstacle_avoidance] STOP - obstacle at distance: $obstacle_distance"
+            elseif obstacle_distance < caution_distance
+                # Gradual deceleration 
+                decel_factor = (obstacle_distance - stop_distance) / (caution_distance - stop_distance)
+                target_vel = 4.0 * decel_factor
+                @info "[obstacle_avoidance] SLOW - obstacle at distance: $obstacle_distance, speed: $target_vel"
+            else
+                # Detected but still far - slightly reduced speed
+                target_vel = 4.5
+                @info "[obstacle_avoidance] CAUTION - obstacle at distance: $obstacle_distance"
+            end
+        else
+            @info "[obstacle_avoidance] No obstacles detected"
+        end
+        
+        # Set command based on obstacle detection
+        cmd = (steering_angle, target_vel, true)
+        
+        # Handle stop signs (existing logic)
         lanes = path[current_segment_index].lane_types
     
         if VehicleSim.stop_sign in lanes
             if !at_stop_sign && t >= 0.85
-                # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
-                println("first 0")
+                println("Stop sign detected")
                 cmd = (steering_angle, target_speed, true)
                 at_stop_sign = true
                 serialize(socket, cmd)
-
                 sleep(2.0)
-
             else
+                # Keep obstacle detection adjustments unless we're at a stop sign
                 cmd = (steering_angle, target_vel, true)
             end
-        else
-            # Regular driving
-            speed = v > 6 ? -1.0 : 1.0
-            cmd = (steering_angle, target_vel * speed, true)
         end
     
+        # Segment transition logic
         if 0.9 ≤ t && current_segment_index < length(path)
             current_segment_index += 1
             at_stop_sign = false
             println("Moving to segment ", current_segment_index)
         elseif 0.2 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
-            println("second zero")
+            println("Arrived at destination")
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
             sleep(3.0)
             fetch(shutdown_channel) && return
-            #old_target_segment = target_segment
             target_segment = fetch(target_segment_channel)
-            #if old_target_segment != target_segment
-                @info "Getting new route"
-                println(target_segment)
-                current_seg = path[current_segment_index].id
-                path = nothing
-                path = routing(localization_state_channel, target_segment, map, current_seg) #this will be the list of segments returned by routing function
-                println(path)
-                polyline = [] #polyline we create
-                pt = nothing
-                for i in 1:length(path)-1
-                    pt = compute_midpoints(path[i])
-                    push!(polyline, pt)
-                end
+            @info "Getting new route"
+            println(target_segment)
+            current_seg = path[current_segment_index].id
+            path = nothing
+            path = routing(localization_state_channel, target_segment, map, current_seg)
+            println(path)
+            polyline = []
+            pt = nothing
+            for i in 1:length(path)-1
+                pt = compute_midpoints(path[i])
+                push!(polyline, pt)
+            end
             pt = compute_midpoint_target(path[end])
             push!(polyline, pt)
             alpha = [0.0, 0.0]
             current_segment_index = 1
             println(polyline)
-            #end
         end
         
+        # Send command to vehicle
         serialize(socket, cmd)
+        
+        # Small sleep to avoid busy-waiting
+        sleep(0.01)
     end
 catch e
     println("ERROR: $e")
@@ -1170,7 +1235,7 @@ function isfull(ch::Channel)
 end
 
 
-function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
+function my_client(host::IPAddr=IPv4(0); use_gt=false, port=4444)
     socket = Sockets.connect(host, port)
     map_segments = VehicleSim.city_map()
     
@@ -1219,31 +1284,36 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
 
     # Define a shared function to convert ground truth to obstacles that can be used by both
     # process_gt and the testing loop
-    function shared_convert_gt_to_obstacles(gt_measurements)
+    function shared_convert_gt_to_obstacles(gt_measurements, ego_vehicle_id)
         obstacles = ObstacleDetection[]
         for gt in gt_measurements
-            # Extract position, checking for valid values
+            # Skip the ego vehicle - important!
+            if gt.vehicle_id == ego_vehicle_id
+                continue
+            end
+            
+            # Extract position with validation
             position = if all(isfinite.(gt.position))
                 gt.position
             else
                 SVector{3, Float64}(0.0, 0.0, 0.0)
             end
             
-           
+            # Extract size with validation
             size = if isdefined(gt, :size) && all(isfinite.(gt.size))
                 gt.size
             else
                 SVector{3, Float64}(4.0, 2.0, 1.5)  # Default car size
             end
             
-            # Extract velocity, checking for valid values
+            # Extract velocity with validation
             velocity = if isdefined(gt, :velocity) && all(isfinite.(gt.velocity[1:2]))
                 gt.velocity[1:2]
             else
                 SVector{2, Float64}(0.0, 0.0)
             end
             
-            # Create the obstacle detection
+            # Create the obstacle detection with high confidence since it's ground truth
             obstacle = ObstacleDetection(
                 position,
                 size,
@@ -1306,78 +1376,75 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
                     if fetch(shutdown_channel)
                         break
                     end
-
+    
                     fresh_gt_meas = []
                     
                     while isready(gt_channel)
                         meas = take!(gt_channel)
                         push!(fresh_gt_meas, meas)
                     end
-
+    
                     if !isempty(fresh_gt_meas)
-                        # Transform GT messages into obstacle detections
                         try
+                            # Convert GT to obstacles, making sure to filter out ego vehicle
+                            gt_detections = shared_convert_gt_to_obstacles(fresh_gt_meas, ego_vehicle_id)
                             
-                            gt_detections = shared_convert_gt_to_obstacles(fresh_gt_meas)
-                         
-                            # Send ground-truth detections into the eval channel for evaluation
+                            @info "[gt_processing] Created $(length(gt_detections)) obstacle detections from ground truth"
+                            
+                            # Send to evaluation channel
                             if isready(gt_eval_channel)
                                 take!(gt_eval_channel)
                             end
                             put!(gt_eval_channel, gt_detections)
-                            
-                            # Create a new localization state from ground truth
-                            # This assumes the first GT measurement is for the ego vehicle
-                            if !isempty(fresh_gt_meas)
-                                ego_gt = fresh_gt_meas[1]  # Just use the first one for simplicity
-                                
-                                # Extract position and orientation, handling potential missing fields
-                                position = if isdefined(ego_gt, :position) && all(isfinite.(ego_gt.position))
-                                    ego_gt.position
-                                else
-                                    SVector{3, Float64}(0.0, 0.0, 0.0)
-                                end
-                                
-                                orientation = if isdefined(ego_gt, :orientation) && all(isfinite.(ego_gt.orientation))
-                                    ego_gt.orientation
-                                else
-                                    SVector{4, Float64}(1.0, 0.0, 0.0, 0.0)  # Identity quaternion
-                                end
-                                
-                                new_localization_state = MyLocalizationType(
-                                    position,
-                                    orientation
-                                )
-                                
-                                if isready(localization_state_channel)
-                                    take!(localization_state_channel)
-                                end
-                                put!(localization_state_channel, new_localization_state)
+
+                            # Create localization state from ego vehicle GT
+                        ego_gt = nothing
+                        for gt in fresh_gt_meas
+                            if gt.vehicle_id == ego_vehicle_id
+                                ego_gt = gt
+                                break
                             end
-                            
-                            # Create a new perception state with the obstacles
-                            new_perception_state = MyPerceptionType(
-                                time(),
-                                gt_detections,  # Use the converted detections
-                                Vector{LaneMarking}()  # No lane markings for now
+                        end
+                        
+                        if ego_gt !== nothing
+                            new_localization_state = MyLocalizationType(
+                                ego_gt.position,
+                                ego_gt.orientation,
+                                ego_gt.velocity
                             )
                             
-                            if isready(perception_state_channel)
-                                take!(perception_state_channel)
+                            if isready(localization_state_channel)
+                                take!(localization_state_channel)
                             end
-                            put!(perception_state_channel, new_perception_state)
-                        catch e
-                            # Exception handling without logging
+                            put!(localization_state_channel, new_localization_state)
                         end
+                        
+                        # Create perception state with obstacles
+                        new_perception_state = MyPerceptionType(
+                            time(),
+                            gt_detections,  # Use the filtered detections
+                            Vector{LaneMarking}()
+                        )
+
+                        # Make sure perception state is updated
+                        if isready(perception_state_channel)
+                            take!(perception_state_channel)
+                        end
+                        put!(perception_state_channel, new_perception_state)
+                        
+                        @info "[gt_processing] Updated perception with $(length(gt_detections)) obstacles"
+                    catch e
+                        @error "[gt_processing] Error processing GT: $e"
                     end
-                    
-                    sleep(0.01)  # Small sleep to avoid busy-waiting
                 end
-            catch e
-                # Exception handling without logging
+                
+                sleep(0.01)
             end
+        catch e
+            @error "[gt_task] Error: $e"
         end
-        push!(tasks, gt_task)
+    end
+    push!(tasks, gt_task)
 
     else
         @info "Using sensor measurements"
@@ -1449,7 +1516,7 @@ push!(tasks, shutdown_task)
     end
 end
 
-function shutdown_listener(shutdown_channel, tasks)
+function shutdown_listener(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
     info_string = 
         "***************
       CLIENT COMMANDS

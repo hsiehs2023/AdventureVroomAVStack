@@ -6,6 +6,7 @@ using Serialization
 using StaticArrays
 using LinearAlgebra
 using DelimitedFiles
+using Hungarian
 
 include("client.jl")
 include("example_project.jl")
