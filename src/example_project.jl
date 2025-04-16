@@ -238,9 +238,7 @@ function process_gt(
 
     try
         while true
-            if fetch(shutdown_channel)
-                break
-            end
+            fetch(shutdown_channel) && return
 
             fresh_gt_meas = []
             
@@ -439,15 +437,15 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
     time_counter = 0
 
     while true
-        fetch(shutdown_channel) && break
+        fetch(shutdown_channel) && return
         fresh_gps_meas = []
         while !isready(gps_channel)
             sleep(0.001)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
         end
         
         while isready(gps_channel)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
             meas = take!(gps_channel)
             push!(fresh_gps_meas, meas)
         end
@@ -455,10 +453,10 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         fresh_imu_meas = []
         while !isready(imu_channel)
             sleep(0.001)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
         end
         while isready(imu_channel)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
             meas = take!(imu_channel)
             push!(fresh_imu_meas, meas)
         end
@@ -466,10 +464,10 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
         fresh_gt_meas = []
         while !isready(gt_channel)
             sleep(0.001)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
         end
         while isready(gt_channel)
-            fetch(shutdown_channel) && break
+            fetch(shutdown_channel) && return
             meas = take!(gt_channel)
             push!(fresh_gt_meas, meas)
         end
@@ -759,7 +757,7 @@ function find_current_segment_routing(pos, map::Dict{Int, VehicleSim.RoadSegment
             return seg_id
         end
     end
-    println("UH OHHHH")
+    @info "No route found"
 end
 
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel, shutdown_channel)
@@ -969,7 +967,6 @@ function decision_making(use_gt, localization_state_channel,
     pt = nothing
     alpha = nothing
     current_segment_index = 1
-    println(target_segment)
     path = routing(localization_state_channel, target_segment, map) #this will be the list of segments returned by routing function
     for i in 1:length(path)-1
         pt = compute_midpoints(path[i])
@@ -988,7 +985,7 @@ function decision_making(use_gt, localization_state_channel,
     stop_start_time = 0.0
     required_stop_time = 10.0  # seconds to wait at stop sign
     while true
-        # fetch(shutdown_channel) && return
+        fetch(shutdown_channel) && return
         # old_target_segment = target_segment
         # target_segment = fetch(target_segment_channel)
         # if old_target_segment != target_segment
@@ -1018,7 +1015,6 @@ function decision_making(use_gt, localization_state_channel,
 
         # println(latest_localization_state)
         latest_perception_state = fetch(perception_state_channel)
-        println(latest_perception_state)
         c1 = latest_localization_state.position[1]
         c2 = latest_localization_state.position[2]
         θ = VehicleSim.extract_yaw_from_quaternion(latest_localization_state.orientation)
@@ -1096,7 +1092,6 @@ function decision_making(use_gt, localization_state_channel,
             if !at_stop_sign && t >= 0.85
                 # decel_factor = clamp(1.0 - (t - 0.2) / 0.3, 0.0, 1.0)
                 target_speed = 0.0
-                println("first 0")
                 cmd = (steering_angle, target_speed, true)
                 at_stop_sign = true
                 serialize(socket, cmd)
@@ -1118,7 +1113,6 @@ function decision_making(use_gt, localization_state_channel,
             println("Moving to segment ", current_segment_index)
         elseif 0.2 ≤ t && current_segment_index >= length(path)
             @info "arrived at target"
-            println("second zero")
             cmd = (steering_angle, 0.0, true)
             serialize(socket, cmd)
             sleep(3.0)
@@ -1127,11 +1121,10 @@ function decision_making(use_gt, localization_state_channel,
             target_segment = fetch(target_segment_channel)
             #if old_target_segment != target_segment
                 @info "Getting new route"
-                println(target_segment)
                 current_seg = path[current_segment_index].id
                 path = nothing
                 path = routing(localization_state_channel, target_segment, map, current_seg) #this will be the list of segments returned by routing function
-                println(path)
+                println("new path: ", path)
                 polyline = [] #polyline we create
                 pt = nothing
                 for i in 1:length(path)-1
@@ -1209,7 +1202,6 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
     put!(localization_state_channel, initial_localization)
 
     # Initialize gt_eval_channel with empty vector
-    println(Vector{ObstacleDetection}())
     put!(gt_eval_channel, Vector{ObstacleDetection}())
 
     target_map_segment = 0 # (not a valid segment, will be overwritten by message)
@@ -1260,12 +1252,13 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
 
     error_mon = errormonitor(@async while true
         # This while loop reads to the end of the socket stream (makes sure you
-        # are looking at the latest messages)
-        fetch(shutdown_channel) && break
+        # are looking at the latest messages)        
+        fetch(shutdown_channel) && return
         sleep(0.001)
         local measurement_msg
         received = false
         while true
+            fetch(shutdown_channel) && return
             @async eof(socket)
             if bytesavailable(socket) > 0
                 measurement_msg = deserialize(socket)
@@ -1274,9 +1267,12 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
                 break
             end
         end
+
         !received && continue
+
         target_map_segment = measurement_msg.target_segment
         old_target_segment = fetch(target_segment_channel)
+
         if target_map_segment != old_target_segment
             take!(target_segment_channel)
             put!(target_segment_channel, target_map_segment)
@@ -1303,9 +1299,7 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
         gt_task = @async begin
             try
                 while true
-                    if fetch(shutdown_channel)
-                        break
-                    end
+                    fetch(shutdown_channel) && return
 
                     fresh_gt_meas = []
                     
@@ -1326,34 +1320,34 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
                             end
                             put!(gt_eval_channel, gt_detections)
                             
-                            # Create a new localization state from ground truth
-                            # This assumes the first GT measurement is for the ego vehicle
-                            if !isempty(fresh_gt_meas)
-                                ego_gt = fresh_gt_meas[1]  # Just use the first one for simplicity
+                            # # Create a new localization state from ground truth
+                            # # This assumes the first GT measurement is for the ego vehicle
+                            # if !isempty(fresh_gt_meas)
+                            #     ego_gt = fresh_gt_meas[1]  # Just use the first one for simplicity
                                 
-                                # Extract position and orientation, handling potential missing fields
-                                position = if isdefined(ego_gt, :position) && all(isfinite.(ego_gt.position))
-                                    ego_gt.position
-                                else
-                                    SVector{3, Float64}(0.0, 0.0, 0.0)
-                                end
+                            #     # Extract position and orientation, handling potential missing fields
+                            #     position = if isdefined(ego_gt, :position) && all(isfinite.(ego_gt.position))
+                            #         ego_gt.position
+                            #     else
+                            #         SVector{3, Float64}(0.0, 0.0, 0.0)
+                            #     end
                                 
-                                orientation = if isdefined(ego_gt, :orientation) && all(isfinite.(ego_gt.orientation))
-                                    ego_gt.orientation
-                                else
-                                    SVector{4, Float64}(1.0, 0.0, 0.0, 0.0)  # Identity quaternion
-                                end
+                            #     orientation = if isdefined(ego_gt, :orientation) && all(isfinite.(ego_gt.orientation))
+                            #         ego_gt.orientation
+                            #     else
+                            #         SVector{4, Float64}(1.0, 0.0, 0.0, 0.0)  # Identity quaternion
+                            #     end
                                 
-                                new_localization_state = MyLocalizationType(
-                                    position,
-                                    orientation
-                                )
+                            #     new_localization_state = MyLocalizationType(
+                            #         position,
+                            #         orientation
+                            #     )
                                 
-                                if isready(localization_state_channel)
-                                    take!(localization_state_channel)
-                                end
-                                put!(localization_state_channel, new_localization_state)
-                            end
+                            #     if isready(localization_state_channel)
+                            #         take!(localization_state_channel)
+                            #     end
+                            #     put!(localization_state_channel, new_localization_state)
+                            # end
                             
                             # Create a new perception state with the obstacles
                             new_perception_state = MyPerceptionType(
@@ -1430,23 +1424,23 @@ function my_client(host::IPAddr=IPv4(0), use_gt=false, port=4444)
         end
     end
     push!(tasks, dec_task)
-    @info "here5"
 
     #push!(tasks, @async perception(cam_channel, localization_state_channel, perception_state_channel))
    # Start the shutdown listener
    shutdown_task = @async begin
-    try
-        shutdown_listener(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
-    catch e
-        @error "Shutdown listener error: $e"
+        try
+            shutdown_listener(shutdown_channel, tasks)
+        catch e
+            @error "Shutdown listener error: $e"
+        end
     end
-end
-push!(tasks, shutdown_task)
+    push!(tasks, shutdown_task)
     # push!(tasks, @async test_target_change(target_segment_channel, shutdown_channel))
 
     for t in tasks
         wait(t)
     end
+
 end
 
 function shutdown_listener(shutdown_channel, tasks)
