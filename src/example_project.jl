@@ -123,7 +123,7 @@ function cluster_detections(detections::Vector{ObstacleDetection}; threshold=2.0
     return merged_detections
 end
 
-function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=5.0)
+function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=2.0)
     n = length(detections)
     m = length(tracks)
 
@@ -182,6 +182,16 @@ function test_projection_jacobian()
     println(J_numeric)
     println("Difference:")
     println(J_analytic - J_numeric)
+end
+
+function deduplicate_detections(detections; dist_thresh=2.0)
+    filtered = ObstacleDetection[]
+    for d in detections
+        if !any(e -> norm(e.position[1:2] - d.position[1:2]) < dist_thresh, filtered)
+            push!(filtered, d)
+        end
+    end
+    return filtered
 end
 
 function process_gt(
@@ -580,7 +590,7 @@ function pixel_to_world(localization_state, cam_meas, box)
         # Get world to camera transform
         T_body_camrot_h = [T_body_camrot; 0 0 0 1]  # make 4×4
         T_world_camrot = T_world_body * T_body_camrot_h
-        
+        @info "[debug] T_world_camrot = \n$(T_world_camrot)"
         # Extract bounding box coordinates
         local top, left, bottom, right
         try
@@ -626,7 +636,7 @@ function pixel_to_world(localization_state, cam_meas, box)
         box_height = abs(bottom - top)
         depth = max(focal_len * 1.5 / (box_height * pixel_len), 1)
         #@info "[pixel_to_world] Using depth: $depth"
-        
+    
         # Project to 3D points in camera frame 
         try
             p1 = SVector{3, Float64}(cam_left * depth / focal_len, cam_top * depth / focal_len, depth)
@@ -743,6 +753,8 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 end
                 
                 @info "[perception] Created $(length(detections)) initial obstacle detections"
+                detections = deduplicate_detections(detections)
+                @info "[perception] After deduplication: $(length(detections)) detections"
             catch e
                 @error "[perception] Failed to process camera measurements: $e"
                 Base.show_backtrace(stderr, catch_backtrace())
@@ -1017,7 +1029,11 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
             elseif meas isa IMUMeasurement
                 !isfull(imu_channel) && put!(imu_channel, meas)
             elseif meas isa CameraMeasurement
-                @info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes"
+                #@info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes"
+                @info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes from camera $(meas.camera_id)"
+                for box in meas.bounding_boxes
+                    @info "  Bounding box: $box"
+                end
                 !isfull(cam_channel) && put!(cam_channel, meas)
             elseif meas isa GroundTruthMeasurement
                 !isfull(gt_channel) && put!(gt_channel, meas)
@@ -1120,6 +1136,8 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
         end
         push!(tasks, loc_task)
 
+        sleep(2.0)
+
         perc_task = @async begin
             try
                 perception(cam_channel, localization_state_channel, perception_state_channel, shutdown_channel)
@@ -1211,6 +1229,16 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     
                             if !isempty(est) && !isempty(gt)
                                 dists = Float64[]
+                                @info "[debug] GT positions:"
+                                for g in gt
+                                    @info "   $(g.id): $(g.position)"
+                                end
+
+                                @info "[debug] Estimated positions:"
+                                for e in est
+                                    @info "   id=$(e.id), pos=$(e.position)"
+                                end
+
                                 for e in est
                                     e_dists = [norm(e.position - g.position) for g in gt]
                                     if !isempty(e_dists)
@@ -1236,15 +1264,15 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     push!(tasks, test_task)
 
     # Start the shutdown listener
-    shutdown_task = @async begin
+    #=shutdown_task = @async begin
         try
             shutdown_listener(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
         catch e
             @error "Shutdown listener error: $e"
         end
     end
-    push!(tasks, shutdown_task)
-    
+    push!(tasks, shutdown_task)=#
+    push!(tasks, @async shutdown_listener(shutdown_channel, tasks))
     # Wait for all tasks to complete
     for task in tasks
         wait(task)
@@ -1294,7 +1322,8 @@ function shutdown_listener(shutdown_channel, tasks)
 
         if key == 'q'
             # terminate threads
-            @info("Terminating threads")
+            take!(shutdown_channel)
+            println("Terminating threads")
             put!(shutdown_channel, true)
             return
         end
