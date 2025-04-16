@@ -421,7 +421,7 @@ function Jac_h_imu(x)
 end
   
 
-function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
+function localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
     # Set up algorithm / initialize variables
     # process measurements
     proc_cov = Diagonal([0.05, 0.05, 0.01, 0.01, 0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.01, 0.01, 0.01])
@@ -463,16 +463,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
             push!(fresh_imu_meas, meas)
         end
 
-        fresh_gt_meas = []
-        while !isready(gt_channel)
-            sleep(0.001)
-            fetch(shutdown_channel) && break
-        end
-        while isready(gt_channel)
-            fetch(shutdown_channel) && break
-            meas = take!(gt_channel)
-            push!(fresh_gt_meas, meas)
-        end
 
         if isready(localization_state_channel)
             take!(localization_state_channel)
@@ -531,28 +521,6 @@ function localize(gps_channel, imu_channel, localization_state_channel, shutdown
 
         push!(gt_states, xₖ)
         push!(timesteps, Δ)
-
-        if false
-            println("Hello")
-            println("   Ground truth (x,y): ", fresh_gt_meas[end].position)
-            println("   estimated: ", μ[1:3])
-            println("   GT linear: ", fresh_gt_meas[end].velocity)
-            println("   estimated linear: ", μ[8:10])
-            println("   GT angular: ", fresh_gt_meas[end].angular_velocity)
-            println("   estimated angular: ", μ[11:13])
-
-        end
-
-        if false #For testing error
-            error = μ[1:3] - fresh_gt_meas[end].position
-            println(error)
-            # Append to a CSV file
-            open("errors.csv", "a") do io
-                writedlm(io, [time_counter error'], ',')  # Transpose error to make it 1 row
-            end
-            time_counter += 1
-
-        end
 
 
 
@@ -1458,7 +1426,7 @@ function my_client(host::IPAddr=IPv4(0); use_gt=false, port=4444)
         @info "Using sensor measurements"
         loc_task = @async begin
             try
-                localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel, gt_channel)
+                localize(gps_channel, imu_channel, localization_state_channel, shutdown_channel)
             catch e
                 @error "Localization task error: $e"
                 for (i, frame) in enumerate(stacktrace(catch_backtrace()))
