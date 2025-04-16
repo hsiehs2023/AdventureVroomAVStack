@@ -126,7 +126,7 @@ function cluster_detections(detections::Vector{ObstacleDetection}; threshold=2.0
     return merged_detections
 end
 
-function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=5.0)
+function associate_tracks(detections::Vector{ObstacleDetection}, tracks::Vector{TrackedObstacle}; threshold=2.0)
     n = length(detections)
     m = length(tracks)
 
@@ -1140,23 +1140,31 @@ function decision_making(use_gt, localization_state_channel,
             if obstacle_distance < stop_distance
                 # Full stop 
                 target_vel = 0.0
+                cmd = (steering_angle, target_vel, true)
+                serialize(socket, cmd)
+                sleep(2.0)
                 @info "[obstacle_avoidance] STOP - obstacle at distance: $obstacle_distance"
             elseif obstacle_distance < caution_distance
                 # Gradual deceleration 
                 decel_factor = (obstacle_distance - stop_distance) / (caution_distance - stop_distance)
                 target_vel = 4.0 * decel_factor
+                cmd = (steering_angle, target_vel, true)
+                serialize(socket, cmd)
                 @info "[obstacle_avoidance] SLOW - obstacle at distance: $obstacle_distance, speed: $target_vel"
             else
                 # Detected but still far - slightly reduced speed
                 target_vel = 4.5
+                cmd = (steering_angle, target_vel, true)
+                serialize(socket, cmd)
                 @info "[obstacle_avoidance] CAUTION - obstacle at distance: $obstacle_distance"
             end
         else
+            cmd = (steering_angle, target_vel, true)
             @info "[obstacle_avoidance] No obstacles detected"
         end
         
         # Set command based on obstacle detection
-        cmd = (steering_angle, target_vel, true)
+        #cmd = (steering_angle, target_vel, true)
         
         # Handle stop signs (existing logic)
         lanes = path[current_segment_index].lane_types
@@ -1459,6 +1467,8 @@ function my_client(host::IPAddr=IPv4(0); use_gt=false, port=4444)
             end
         end
         push!(tasks, loc_task)
+
+        sleep(2.0)
 
         perc_task = @async begin
             try
