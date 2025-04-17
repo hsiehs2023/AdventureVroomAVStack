@@ -1,3 +1,10 @@
+mutable struct EvalLog
+    entries::Vector{NamedTuple}
+    function EvalLog()
+        new(Vector{NamedTuple}())
+    end
+end
+
 mutable struct TrackedObstacle
     id::Int
     x::SVector{4, Float64}            # [px, py, vx, vy]
@@ -590,7 +597,7 @@ function pixel_to_world(localization_state, cam_meas, box)
         # Get world to camera transform
         T_body_camrot_h = [T_body_camrot; 0 0 0 1]  # make 4×4
         T_world_camrot = T_world_body * T_body_camrot_h
-        @info "[debug] T_world_camrot = \n$(T_world_camrot)"
+        #@info "[debug] T_world_camrot = \n$(T_world_camrot)"
         # Extract bounding box coordinates
         local top, left, bottom, right
         try
@@ -703,7 +710,7 @@ function find_current_segment(localization_state::MyLocalizationType, all_segs::
 end
 
 function perception(cam_meas_channel, localization_state_channel, perception_state_channel, shutdown_channel)
-    @info "[perception] Running perception loop"
+    #@info "[perception] Running perception loop"
     tracks = TrackedObstacle[]
     next_track_id = 1
     
@@ -724,7 +731,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 push!(fresh_cam_meas, take!(cam_meas_channel))
             end
 
-            @info "[perception] Got $(length(fresh_cam_meas)) fresh camera measurements"
+            #@info "[perception] Got $(length(fresh_cam_meas)) fresh camera measurements"
 
             if isempty(fresh_cam_meas)
                 continue
@@ -738,23 +745,23 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 #@info "[perception] Got localization: $(latest_localization_state)"
             
                 for cam_meas in fresh_cam_meas
-                    @info "[perception] Processing camera measurement with $(length(cam_meas.bounding_boxes)) boxes"
+                    #@info "[perception] Processing camera measurement with $(length(cam_meas.bounding_boxes)) boxes"
                     for box in cam_meas.bounding_boxes
-                        @info "[perception] Processing box: $box"
+                        #@info "[perception] Processing box: $box"
                         try
                             pos, size = pixel_to_world(latest_localization_state, cam_meas, box)
-                            @info "[perception] Computed world position: $pos, size: $size"
+                            #@info "[perception] Computed world position: $pos, size: $size"
                             push!(detections, ObstacleDetection(pos, size, SVector(0.0, 0.0), 0.8, 0))
                         catch e
-                            @error "[perception] Failed to process box: $e"
+                            #@error "[perception] Failed to process box: $e"
                             Base.show_backtrace(stderr, catch_backtrace())
                         end
                     end
                 end
                 
-                @info "[perception] Created $(length(detections)) initial obstacle detections"
+                #@info "[perception] Created $(length(detections)) initial obstacle detections"
                 detections = deduplicate_detections(detections)
-                @info "[perception] After deduplication: $(length(detections)) detections"
+                #@info "[perception] After deduplication: $(length(detections)) detections"
             catch e
                 @error "[perception] Failed to process camera measurements: $e"
                 Base.show_backtrace(stderr, catch_backtrace())
@@ -762,7 +769,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             end
 
             detections = cluster_detections(detections)
-            @info "[perception] After clustering: $(length(detections)) detections"
+            #@info "[perception] After clustering: $(length(detections)) detections"
 
             # Apply EKF prediction to existing tracks
             for track in tracks
@@ -776,11 +783,11 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
             assignment = [j > length(tracks) ? 0 : j for j in assignment]
             
             # Debug the assignment to understand its structure
-            @info "[perception] Assignment result: $assignment"
+            #@info "[perception] Assignment result: $assignment"
             
             # Count non-zero assignments to report how many are matched with existing tracks
             num_matched = count(x -> x != 0, assignment)
-            @info "[perception] Associated $num_matched detections with existing tracks"
+            #@info "[perception] Associated $num_matched detections with existing tracks"
 
             assigned_tracks = Set{Int}()
             
@@ -790,7 +797,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 if i <= length(assignment)
                     track_idx = assignment[i]
                 else
-                    @warn "[perception] No assignment for detection $i"
+                    #@warn "[perception] No assignment for detection $i"
                     track_idx = 0  # Default to creating a new track
                 end
                 
@@ -844,7 +851,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
 
             # Remove old tracks that haven't been seen recently
             tracks = [t for t in tracks if (current_time - t.last_seen < 2.0) || (t.confidence > 0.3)]
-            @info "[perception] After cleanup: $(length(tracks)) active tracks"
+            #@info "[perception] After cleanup: $(length(tracks)) active tracks"
 
             # Create perception state with current detections
             perception_state = MyPerceptionType(
@@ -853,7 +860,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
                 Vector{LaneMarking}()  # No lane markings for now
             )
 
-            @info "[perception] Created perception state with $(length(detections)) detections"
+            #@info "[perception] Created perception state with $(length(detections)) detections"
 
             # Update perception channel with new state
             if isready(perception_state_channel)
@@ -869,7 +876,7 @@ function perception(cam_meas_channel, localization_state_channel, perception_sta
         @error "[perception] CRASHED with error: $e"
         Base.show_backtrace(stderr, catch_backtrace())
     end
-    @info "[perception] Wrote perception with $(length(detections)) obstacles at time $(current_time)"
+    #@info "[perception] Wrote perception with $(length(detections)) obstacles at time $(current_time)"
 end
 
 function decision_making(localization_state_channel, 
@@ -915,13 +922,13 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
      diff = J_analytic - J_numeric
      max_diff = maximum(abs.(diff))
  
-     @info "[jacobian-test] Analytic Jacobian:\n$J_analytic"
-     @info "[jacobian-test] Numeric Jacobian:\n$J_numeric"
-     @info "[jacobian-test] Difference:\n$diff"
+     #@info "[jacobian-test] Analytic Jacobian:\n$J_analytic"
+     #@info "[jacobian-test] Numeric Jacobian:\n$J_numeric"
+     #@info "[jacobian-test] Difference:\n$diff"
      if max_diff < 1e-5
-         @info "[jacobian-test] PASSED: max error $max_diff"
+         #@info "[jacobian-test] PASSED: max error $max_diff"
      else
-         @error "[jacobian-test] FAILED: max error $max_diff exceeds tolerance"
+         #@error "[jacobian-test] FAILED: max error $max_diff exceeds tolerance"
      end
 
     gps_channel = Channel{GPSMeasurement}(32)
@@ -1030,9 +1037,9 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
                 !isfull(imu_channel) && put!(imu_channel, meas)
             elseif meas isa CameraMeasurement
                 #@info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes"
-                @info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes from camera $(meas.camera_id)"
+                #@info "Received CameraMeasurement with $(length(meas.bounding_boxes)) boxes from camera $(meas.camera_id)"
                 for box in meas.bounding_boxes
-                    @info "  Bounding box: $box"
+                    #@info "  Bounding box: $box"
                 end
                 !isfull(cam_channel) && put!(cam_channel, meas)
             elseif meas isa GroundTruthMeasurement
@@ -1170,15 +1177,15 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     push!(tasks, dec_task)
     
     # Perception testing task
+    eval_log = EvalLog()
+
     test_task = @async begin
         last_timestamp = 0.0
-    
         while true
             sleep(1.0)
-    
             fetch(shutdown_channel) && break
     
-            # --- Update GT Eval Channel ---
+            # Update GT Eval Channel
             if isready(gt_channel)
                 gt_meas = GroundTruthMeasurement[]
                 while isready(gt_channel)
@@ -1187,21 +1194,18 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     
                 try
                     gt_detections = shared_convert_gt_to_obstacles(gt_meas)
-    
                     if isready(gt_eval_channel)
                         take!(gt_eval_channel)
                     end
                     put!(gt_eval_channel, gt_detections)
                 catch e
-                    @error "Error converting ground truth measurements in test loop: $e"
+                    @error "Error converting ground truth measurements: $e"
                 end
             end
     
-            # --- Perception Evaluation ---
+            # Perception Evaluation
             try
                 new_perception = nothing
-    
-                # Wait for a perception state with a newer timestamp
                 while true
                     if isready(perception_state_channel)
                         maybe_new = fetch(perception_state_channel)
@@ -1217,42 +1221,49 @@ function my_client(host::IPAddr=IPv4(0), port=4444; use_gt=false)
     
                 if new_perception !== nothing
                     @info "[test] Read NEW perception state with timestamp $(new_perception.timestamp) and $(length(new_perception.obstacles)) obstacles"
-    
-                    # --- Compare to ground truth ---
+                
                     if isready(gt_eval_channel)
                         try
-                            gt = fetch(gt_eval_channel)
+                            raw_gt = fetch(gt_eval_channel)
                             est = new_perception.obstacles
-    
+                
+                            # Deduplicate GT entries by id
+                            gt_dict = Dict(g.id => g for g in raw_gt)
+                
+                            dists = Float64[]
+                            matched_ids = 0
+                
                             @info "Comparing perception to ground truth:"
-                            @info "   # Perceived: $(length(est)), # GT: $(length(unique(obstacle.id for obstacle in gt)))"
-    
-                            if !isempty(est) && !isempty(gt)
-                                dists = Float64[]
-                                @info "[debug] GT positions:"
-                                for g in gt
-                                    @info "   $(g.id): $(g.position)"
+                            @info "   # Perceived: $(length(est)), # GT: $(length(gt_dict))"
+                
+                            @info "[debug] GT positions:"
+                            for (id, g) in gt_dict
+                                @info "   $id: $(g.position)"
+                            end
+                
+                            @info "[debug] Estimated positions:"
+                            for e in est
+                                @info "   id=$(e.id), pos=$(e.position)"
+                            end
+                
+                            for e in est
+                                if haskey(gt_dict, e.id)
+                                    g = gt_dict[e.id]
+                                    push!(dists, norm(e.position - g.position))
+                                    matched_ids += 1
                                 end
-
-                                @info "[debug] Estimated positions:"
-                                for e in est
-                                    @info "   id=$(e.id), pos=$(e.position)"
-                                end
-
-                                for e in est
-                                    e_dists = [norm(e.position - g.position) for g in gt]
-                                    if !isempty(e_dists)
-                                        push!(dists, minimum(e_dists))
-                                    end
-                                end
-    
-                                if !isempty(dists)
-                                    avg_error = sum(dists) / length(dists)
-                                    @info "   Avg nearest neighbor error: $(round(avg_error, digits=2)) meters"
-                                end
+                            end
+                
+                            if !isempty(dists)
+                                avg_error = sum(dists) / length(dists)
+                                @info "   Matched IDs: $matched_ids"
+                                @info "   Avg position error: $(round(avg_error, digits=2)) meters"
+                            else
+                                @info "   No matching IDs found between estimated and ground truth objects"
                             end
                         catch e
                             @error "Error comparing to ground truth: $e"
+                            Base.show_backtrace(stderr, catch_backtrace())
                         end
                     end
                 end
